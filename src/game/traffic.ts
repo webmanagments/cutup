@@ -13,6 +13,36 @@ export interface TrafficSprite {
   length: number; // world length (units)
   slow: boolean; // trucks cruise slower
   bodyW: number; // body width in sprite pixels (for collisions)
+  base: HTMLCanvasElement; // rear face without the cabin (the 3D cabin is drawn by the engine)
+  body: Body3D;
+}
+
+/** Shape of the 3D body behind the rear face. Heights and widths in sprite pixels, z as fractions of the length. */
+export interface Body3D {
+  group: 'car' | 'van' | 'truck';
+  hw: number; // half width
+  lo: number; // underside of the body
+  belt: number; // top of the lower body (or of the box for vans and trucks)
+  cb: number; // cabin half width at the beltline
+  ct: number; // cabin half width at the roof
+  roof: number;
+  g0: number; // rear glass starts (beltline)
+  g1: number; // roof starts
+  r1: number; // roof ends
+  c1: number; // cabin meets the hood
+  box1: number; // trucks: end of the box; vans: end of the tall body
+  cab0: number; // trucks: tractor / cab starts
+  cabH: number;
+  cabHW: number;
+  wheels: number[];
+  wr: number;
+  side: string;
+  sideLo: string;
+  top: string;
+  roofC: string;
+  sheen: string;
+  cabSide: string;
+  cabTop: string;
 }
 
 const COLORS = ['#c9d1da', '#8e99a6', '#4b5563', '#2f5aa8', '#a3282f', '#e5e7eb', '#1f6f5c', '#b8862b', '#6b4fa0', '#d6d0c4', '#3b4652', '#8c2f39'];
@@ -43,17 +73,67 @@ function shade(hex: string, k: number): string {
   return `rgb(${f(n >> 16)},${f((n >> 8) & 255)},${f(n & 255)})`;
 }
 
-export function makeTrafficSprite(kind: TrafficKind, color: string): TrafficSprite {
+function bodyOf(kind: TrafficKind, color: string, cab: string): Body3D {
+  const s = SPEC[kind];
+  const hw = s.w / 2;
+  const belt = 20 + s.body;
+  const cabW = s.w * (kind === 'pickup' ? 0.66 : 0.72);
+  const truck = kind === 'box' || kind === 'semi';
+  const b: Body3D = {
+    group: truck ? 'truck' : kind === 'van' ? 'van' : 'car',
+    hw,
+    lo: truck ? 18 : 9,
+    belt,
+    cb: cabW / 2 + 8,
+    ct: cabW / 2 - 15,
+    roof: belt + s.cab,
+    g0: 0.25,
+    g1: 0.4,
+    r1: 0.64,
+    c1: 0.8,
+    box1: 1,
+    cab0: 1,
+    cabH: 0,
+    cabHW: 0,
+    wheels: [0.17, 0.82],
+    wr: s.w * 0.165,
+    side: shade(color, truck ? 0.62 : 0.6),
+    sideLo: shade(color, truck ? 0.45 : 0.4),
+    top: shade(color, truck ? 0.86 : 1),
+    roofC: shade(color, 1.14),
+    sheen: shade(color, 1.55),
+    cabSide: shade(cab, 0.62),
+    cabTop: shade(cab, 1.05),
+  };
+  if (kind === 'hatch') Object.assign(b, {g0: 0.03, g1: 0.13, r1: 0.62, c1: 0.78});
+  if (kind === 'suv') Object.assign(b, {g0: 0.015, g1: 0.05, r1: 0.7, c1: 0.82});
+  if (kind === 'pickup') Object.assign(b, {g0: 0.42, g1: 0.435, r1: 0.66, c1: 0.78});
+  if (kind === 'van') Object.assign(b, {box1: 0.8, wheels: [0.15, 0.84]});
+  if (kind === 'box') Object.assign(b, {box1: 0.72, cab0: 0.74, cabH: belt * 0.64, cabHW: hw * 0.95, wheels: [0.12, 0.86], wr: s.w * 0.15});
+  if (kind === 'semi') Object.assign(b, {box1: 0.74, cab0: 0.775, cabH: belt * 0.86, cabHW: hw * 0.9, wheels: [0.05, 0.11, 0.81, 0.87, 0.965], wr: s.w * 0.15});
+  return b;
+}
+
+export function makeTrafficSprite(kind: TrafficKind, color: string, cabColor = color): TrafficSprite {
   const s = SPEC[kind];
   const W = SPRITE_W;
   const H = s.h;
   const cx = W / 2;
   const ground = H - 12;
   const half = s.w / 2;
-  const c = document.createElement('canvas');
-  c.width = W;
-  c.height = H;
-  const g = c.getContext('2d')!;
+  const mk = () => {
+    const c = document.createElement('canvas');
+    c.width = W;
+    c.height = H;
+    return c;
+  };
+  const c = mk();
+  const base = mk();
+  // The full rear view (used far away), then the same without the cabin (used up close, where
+  // the engine draws the cabin, rear glass and roof in 3D).
+  const lightY = paintRear(c.getContext('2d')!, true);
+  paintRear(base.getContext('2d')!, false);
+  function paintRear(g: CanvasRenderingContext2D, withCab: boolean): number {
   // shadow + tyres
   g.fillStyle = 'rgba(0,0,0,.75)';
   g.beginPath();
@@ -111,6 +191,7 @@ export function makeTrafficSprite(kind: TrafficKind, color: string): TrafficSpri
     rr(g, cx - half, bodyTop, s.w, s.body, 12);
     g.fill();
     // cabin
+    if (withCab) {
     const cabW = s.w * (kind === 'pickup' ? 0.66 : 0.72);
     const cabTop = bodyTop - s.cab;
     g.fillStyle = shade(color, 0.95);
@@ -137,6 +218,7 @@ export function makeTrafficSprite(kind: TrafficKind, color: string): TrafficSpri
     g.moveTo(cx - cabW / 5, cabTop + 10);
     g.lineTo(cx - cabW / 5 - 8, bodyTop - 3);
     g.stroke();
+    }
     if (kind === 'pickup') {
       g.fillStyle = shade(color, 0.7);
       g.fillRect(cx - half + 8, bodyTop + 6, s.w - 16, 4);
@@ -155,6 +237,11 @@ export function makeTrafficSprite(kind: TrafficKind, color: string): TrafficSpri
   g.fill();
   rr(g, cx + half - 8 - lw, lightY, lw, lh, 3);
   g.fill();
+  return lightY;
+  }
+  const lw = kind === 'box' || kind === 'semi' ? 16 : 26;
+  const lh = kind === 'box' || kind === 'semi' ? 12 : 11;
+  const bodyTop = ground - 20 - s.body;
 
   const glow = document.createElement('canvas');
   glow.width = W;
@@ -183,6 +270,8 @@ export function makeTrafficSprite(kind: TrafficKind, color: string): TrafficSpri
     length: s.len,
     slow: s.slow,
     bodyW: s.w,
+    base,
+    body: bodyOf(kind, color, cabColor),
   };
 }
 
@@ -196,7 +285,12 @@ export function trafficPool(): TrafficSprite[] {
   let ci = 0;
   for (const k of KINDS) {
     const n = k === 'box' || k === 'semi' ? 2 : 3;
-    for (let i = 0; i < n; i++) pool.push(makeTrafficSprite(k, k === 'box' || k === 'semi' ? ['#e8ebee', '#c7ccd3', '#b9c2cc'][i % 3] : COLORS[ci++ % COLORS.length]));
+    for (let i = 0; i < n; i++)
+      pool.push(
+        k === 'box' || k === 'semi'
+          ? makeTrafficSprite(k, ['#e8ebee', '#c7ccd3', '#b9c2cc'][i % 3], k === 'semi' ? ['#a3282f', '#2f5aa8'][i % 2] : ['#e8ebee', '#d6d0c4'][i % 2])
+          : makeTrafficSprite(k, COLORS[ci++ % COLORS.length]),
+      );
   }
   return pool;
 }

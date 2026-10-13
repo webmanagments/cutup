@@ -26,6 +26,10 @@ const HIT_W = 0.88; // fraction of the drawn width
 const HIT_L = 0.9; // fraction of the drawn length
 const halfWidth = (spritePx: number) => ((spritePx / 2) * SPR_K) / ROAD_W;
 const WALL = 2400; // tunnel wall height
+const NEAR = 60; // near clip plane, world units in front of the camera
+const LOD_3D = 9000; // traffic farther than this is a flat rear view (its depth is under a pixel or two)
+const OCT_C = Array.from({length: 8}, (_, k) => Math.cos((k / 8) * Math.PI * 2));
+const OCT_S = Array.from({length: 8}, (_, k) => Math.sin((k / 8) * Math.PI * 2));
 
 // ---- Random -------------------------------------------------------------------
 const rnd = Math.random;
@@ -124,15 +128,18 @@ interface Particle {
   kind: 'spark' | 'shard' | 'smoke';
 }
 
+// Score callouts live in small feeds at the screen edges, never over the road ahead.
 interface Popup {
   text: string;
   sub: string;
   color: string;
-  x: number;
-  y: number;
+  side: -1 | 1; // which edge feed
+  y: number; // current (eased) position in the feed
   born: number;
-  big: boolean;
 }
+const FEED_Y = 318; // newest callout's baseline; older ones stack upward
+const FEED_GAP = 38;
+const FEED_MAX = 3;
 
 export interface RunResult {
   score: number;
@@ -246,6 +253,16 @@ export class Game {
   private pw = new Float32Array(DRAW + 1);
   private ps = new Float32Array(DRAW + 1);
   private pz = new Float32Array(DRAW + 1);
+  private xw = new Float32Array(DRAW + 1); // road centre (world x) per segment
+  private yw = new Float32Array(DRAW + 1); // road height per segment
+  private zBase = 0;
+  private camY = 0;
+  private dfov = DEPTH;
+  // polygon scratch for the 3D traffic bodies: (z, lateral, height) triples
+  private pa = new Float64Array(96);
+  private pb = new Float64Array(96);
+  private nv = 0;
+  private pt = new Float64Array(2);
   private buckets: Car[][] = Array.from({length: DRAW}, () => []);
 
   // state
@@ -613,7 +630,7 @@ export class Game {
     if (play && !this.bestShown && best > 0 && this.score > best) {
       this.bestShown = true;
       sfx.bank();
-      this.popups.push({text: 'New best!', sub: 'Keep it going', color: '#35f2ff', x: W / 2, y: 190, born: this.time, big: true});
+      this.pop('New best!', 'Keep it going', '#35f2ff', -1);
     }
 
     // Spawn / despawn
@@ -684,18 +701,14 @@ export class Game {
       this.res.threads++;
       this.pending += 600 * mult;
       sfx.thread();
-      this.popups.push({text: 'Thread the needle', sub: `+${(600 * mult).toLocaleString('en-US')}`, color: '#35f2ff', x: W / 2, y: 300, born: this.time, big: true});
+      this.pop('Threaded', `+${(600 * mult).toLocaleString('en-US')}`, '#35f2ff', side);
     }
     this.lastNear = {t: this.time, side};
-    this.popups.push({
-      text: label,
-      sub: `+${pts.toLocaleString('en-US')}`,
-      color: tier === 2 ? '#ff3ad1' : tier === 1 ? '#ffcf4a' : '#ffffff',
-      x: W / 2 + side * 150,
-      y: 400,
-      born: this.time,
-      big: tier === 2,
-    });
+    this.pop(label, `+${pts.toLocaleString('en-US')}`, tier === 2 ? '#ff3ad1' : tier === 1 ? '#ffcf4a' : '#ffffff', side);
+  }
+
+  private pop(text: string, sub: string, color: string, side: -1 | 1) {
+    this.popups.push({text, sub, color, side, y: FEED_Y + 22, born: this.time});
   }
 
   private bank() {
@@ -760,6 +773,9 @@ export class Game {
     const playerY = this.segY(pz);
     const camY = playerY + CAM_H;
     const nitroFov = this.fov;
+    this.zBase = base * SEG;
+    this.camY = camY;
+    this.dfov = DEPTH * nitroFov;
 
     // Sky: a soft glow over the city, the moon, then the skyline with parallax.
     g.drawImage(S.skyGlow, 0, HORIZON - 140, W, 150);
@@ -790,22 +806,27 @@ export class Game {
       this.pw[n] = scale * ROAD_W * (W / 2);
       this.ps[n] = scale;
       this.pz[n] = cz;
+      this.xw[n] = x;
+      this.yw[n] = tr.y[i];
       x += dx;
       dx += tr.curve[i];
     }
 
     // Bucket traffic by segment so it draws in depth order with the road.
     for (const b of this.buckets) b.length = 0;
+    // A car whose tail is already behind the camera (one alongside you) still shows the rest of its body.
+    const nearZ = this.pos + NEAR;
     for (const c of this.cars) {
-      const n = Math.floor((c.z - c.spr.length / 2) / SEG) - base;
+      const rear = c.z - c.spr.length / 2;
+      if (rear + c.spr.length <= nearZ) continue;
+      const n = Math.floor(Math.max(rear, nearZ) / SEG) - base;
       if (n >= 0 && n < DRAWN) this.buckets[n].push(c);
     }
 
     // Draw back to front.
-    const near: [Car, number, number][] = [];
+    const near: [Car, number][] = [];
     const tunnelHere = tr.tunnel[Math.floor(pz / SEG) % N_SEG] > 0;
     for (let n = DRAWN - 1; n >= 0; n--) {
-      if (this.pz[n] <= 30) continue;
       const i = (base + n) % N_SEG;
       const x1 = this.px[n];
       const y1 = this.py[n];
@@ -818,7 +839,8 @@ export class Game {
       if (a <= 0.02) continue;
       g.globalAlpha = a;
       const inTunnel = tr.tunnel[i] > 0;
-      if (y2 < y1) {
+      const roadHere = this.pz[n] > 30;
+      if (roadHere && y2 < y1) {
         // lamp pools: brightest under each light
         const lampD = inTunnel ? Math.min(i % 4, 4 - (i % 4)) / 2 : Math.min(i % 12, 12 - (i % 12));
         const lit = inTunnel ? 4 - Math.round(lampD * 2) : clamp(4 - lampD, 0, 4);
@@ -847,17 +869,23 @@ export class Game {
           g.fillRect(x1 + w1 * 0.95 - r, y1 - r, r * 2, r);
         }
       }
-      if (inTunnel) this.drawTunnel(g, i, n, x1, y1, w1, x2, y2, w2, a);
-      if (tr.lamp[i] && n > 1) this.drawLamps(g, n, x1, y1, w1, a);
-      if (tr.sign[i] && n > 2 && n < 140) this.drawGantry(g, n, x1, y1, w1, a, i);
-      if (tr.bridge[i] && n > 1 && n < 150) this.drawBridge(g, x1, y1, w1, a);
+      if (roadHere) {
+        if (inTunnel) this.drawTunnel(g, i, n, x1, y1, w1, x2, y2, w2, a);
+        if (tr.lamp[i] && n > 1) this.drawLamps(g, n, x1, y1, w1, a);
+        if (tr.sign[i] && n > 2 && n < 140) this.drawGantry(g, n, x1, y1, w1, a, i);
+        if (tr.bridge[i] && n > 1 && n < 150) this.drawBridge(g, x1, y1, w1, a);
+      }
       const b = this.buckets[n];
       if (b.length) {
         b.sort((p, q) => q.z - p.z);
         for (const c of b) {
-          // Cars nearer the camera than your rear bumper are drawn again over your car below.
-          if (c.z - c.spr.length / 2 < pz) near.push([c, n, a]);
-          else this.drawCar(g, c, n, base, a, now);
+          // A car whose tail is nearer than your rear bumper is split: the part ahead of you is
+          // drawn now (behind your car), the part beside/behind you after your car.
+          const rear = c.z - c.spr.length / 2;
+          if (rear < pz) {
+            near.push([c, a]);
+            if (rear + c.spr.length > pz) this.drawCar(g, c, a, now, pz, Infinity, false);
+          } else this.drawCar(g, c, a, now, -Infinity, Infinity, true);
         }
       }
     }
@@ -870,7 +898,7 @@ export class Game {
 
     this.drawSpeedLines(g, now);
     this.drawPlayer(g, now);
-    for (const [c, n, a] of near.reverse()) this.drawCar(g, c, n, base, a, now);
+    for (const [c, a] of near) this.drawCar(g, c, a, now, -Infinity, pz, true);
     g.globalAlpha = 1;
     this.drawParticles(g);
     if (this.opts.mode === 'play') {
@@ -1013,18 +1041,113 @@ export class Game {
     g.globalAlpha = a;
   }
 
-  private drawCar(g: CanvasRenderingContext2D, c: Car, n: number, base: number, a: number, now: number) {
-    const rear = c.z - c.spr.length / 2;
-    const f = clamp((rear - (base + n) * SEG) / SEG, 0, 1);
-    const scale = this.ps[n] + (this.ps[n + 1] - this.ps[n]) * f;
-    const sx = this.px[n] + (this.px[n + 1] - this.px[n]) * f + c.x * (this.pw[n] + (this.pw[n + 1] - this.pw[n]) * f);
-    const sy = this.py[n] + (this.py[n + 1] - this.py[n]) * f;
-    const k = SPR_K * scale * (W / 2);
+  /** Project a world point (absolute z, lateral world units from the road centre, height) into this.pt. */
+  private proj(z: number, lat: number, h: number) {
+    const t = (z - this.zBase) / SEG;
+    let n = Math.floor(t);
+    if (n < 0) n = 0;
+    else if (n > this.draw - 1) n = this.draw - 1;
+    const f = t - n;
+    const xw = this.xw[n] + (this.xw[n + 1] - this.xw[n]) * f;
+    const yw = this.yw[n] + (this.yw[n + 1] - this.yw[n]) * f;
+    const s = this.dfov / Math.max(z - this.pos, NEAR * 0.5);
+    this.pt[0] = W / 2 + s * (xw + lat - this.camX) * (W / 2);
+    this.pt[1] = HORIZON - s * (yw + h - this.camY) * (H / 2);
+  }
+
+  /** Add a polygon vertex: absolute z, lateral world x, height (world units). */
+  private v(z: number, lat: number, h: number) {
+    const i = this.nv * 3;
+    this.pa[i] = z;
+    this.pa[i + 1] = lat;
+    this.pa[i + 2] = h;
+    this.nv++;
+  }
+
+  private clipZ(src: Float64Array, n: number, dst: Float64Array, lim: number, keepAbove: boolean): number {
+    let m = 0;
+    for (let i = 0; i < n; i++) {
+      const j = i + 1 === n ? 0 : i + 1;
+      const az = src[i * 3];
+      const bz = src[j * 3];
+      const ain = keepAbove ? az >= lim : az <= lim;
+      const bin = keepAbove ? bz >= lim : bz <= lim;
+      if (ain) {
+        dst[m * 3] = az;
+        dst[m * 3 + 1] = src[i * 3 + 1];
+        dst[m * 3 + 2] = src[i * 3 + 2];
+        m++;
+      }
+      if (ain !== bin) {
+        const t = (lim - az) / (bz - az);
+        dst[m * 3] = lim;
+        dst[m * 3 + 1] = src[i * 3 + 1] + (src[j * 3 + 1] - src[i * 3 + 1]) * t;
+        dst[m * 3 + 2] = src[i * 3 + 2] + (src[j * 3 + 2] - src[i * 3 + 2]) * t;
+        m++;
+      }
+    }
+    return m;
+  }
+
+  /** Clip the polygon built with v() to lo ≤ z ≤ hi, project it and fill it. */
+  private fillPoly(g: CanvasRenderingContext2D, lo: number, hi: number, fill: string) {
+    let n = this.nv;
+    this.nv = 0;
+    n = this.clipZ(this.pa, n, this.pb, lo, true);
+    if (n < 3) return;
+    n = this.clipZ(this.pb, n, this.pa, hi, false);
+    if (n < 3) return;
+    const a = this.pa;
+    g.fillStyle = fill;
+    g.beginPath();
+    for (let i = 0; i < n; i++) {
+      this.proj(a[i * 3], a[i * 3 + 1], a[i * 3 + 2]);
+      if (i === 0) g.moveTo(this.pt[0], this.pt[1]);
+      else g.lineTo(this.pt[0], this.pt[1]);
+    }
+    g.closePath();
+    g.fill();
+  }
+
+  /** A wheel on the side of a body: an octagon in the side plane. */
+  private wheel(g: CanvasRenderingContext2D, zc: number, lat: number, r: number, lo: number, hi: number) {
+    for (let k = 0; k < 8; k++) this.v(zc + r * OCT_C[k], lat, r + r * OCT_S[k]);
+    this.fillPoly(g, lo, hi, '#06070a');
+    const rr = r * 0.56;
+    for (let k = 0; k < 8; k++) this.v(zc + rr * OCT_C[k], lat, r + rr * OCT_S[k]);
+    this.fillPoly(g, lo, hi, '#4a535e');
+    const hr = r * 0.2;
+    for (let k = 0; k < 8; k++) this.v(zc + hr * OCT_C[k], lat, r + hr * OCT_S[k]);
+    this.fillPoly(g, lo, hi, '#1a1e24');
+  }
+
+  /**
+   * Traffic is drawn as a real 3D body: the side facing you, the roof and glass, the hood, the
+   * wheels, then the rear face on top. Its full length is visible, so if it's beside you, you see it.
+   * zlo/zhi clip the body (cars alongside you are split around your car for correct overlap).
+   */
+  private drawCar(g: CanvasRenderingContext2D, c: Car, a: number, now: number, zlo: number, zhi: number, rearFace: boolean) {
+    g.globalAlpha = a;
+    const L = c.spr.length;
+    const rear = c.z - L / 2;
+    const cz = rear - this.pos;
+    const flat = cz > LOD_3D;
+    if (!flat) {
+      const lo = Math.max(zlo, rear, this.pos + NEAR);
+      const hi = Math.min(zhi, rear + L);
+      if (hi > lo) this.drawBody(g, c, lo, hi, a);
+    }
+    if (!rearFace || cz < NEAR) return;
+    const s = this.dfov / cz;
+    const k = SPR_K * s * (W / 2);
     const dw = SPRITE_W * k;
-    const dh = c.spr.h * k;
     if (dw < 2) return;
+    this.proj(rear, c.x * ROAD_W, 0);
+    const sx = this.pt[0];
+    const sy = this.pt[1];
+    const dh = c.spr.h * k;
     const top = sy - (c.spr.h - 12) * k;
-    g.drawImage(c.spr.canvas, sx - dw / 2, top, dw, dh);
+    g.drawImage(flat ? c.spr.canvas : c.spr.base, sx - dw / 2, top, dw, dh);
     g.drawImage(c.spr.glow, sx - dw / 2, top, dw, dh);
     if (c.signal && Math.floor(now / 280) % 2 === 0) {
       g.globalCompositeOperation = 'lighter';
@@ -1033,6 +1156,291 @@ export class Game {
       g.drawImage(this.S.amber, sx - dw / 2 + lx * k - gs / 2, top + ly * k - gs / 2, gs, gs);
       g.drawImage(this.S.amber, sx - dw / 2 + lx * k - gs / 4, top + ly * k - gs / 4, gs / 2, gs / 2);
     }
+    g.globalCompositeOperation = 'source-over';
+    g.globalAlpha = a;
+  }
+
+  /** Which side of a body at lateral X with half width hw faces the camera: -1 left, 1 right, 0 neither. */
+  private sideFacing(z: number, X: number, hw: number): number {
+    this.proj(z, X + hw, 0);
+    if (this.pt[0] < W / 2) return 1;
+    this.proj(z, X - hw, 0);
+    if (this.pt[0] > W / 2) return -1;
+    return 0;
+  }
+
+  private drawBody(g: CanvasRenderingContext2D, c: Car, lo: number, hi: number, a: number) {
+    const b = c.spr.body;
+    const K = SPR_K;
+    const L = c.spr.length;
+    const r0 = c.z - L / 2;
+    const X = c.x * ROAD_W;
+    const Z = (f: number) => r0 + f * L;
+    const hw = b.hw * K;
+    const lo3 = b.lo * K;
+    const belt = b.belt * K;
+    const near = r0 - this.pos < 5200; // small details only where they're big enough to see
+    const sg = this.sideFacing(lo, X, hw);
+    const sl = X + sg * hw;
+    const v = (f: number, lat: number, h: number) => this.v(Z(f), lat, h);
+
+    // contact shadow
+    const sh = hw + 10 * K;
+    v(-0.015, X - sh, 0);
+    v(-0.015, X + sh, 0);
+    v(1.02, X + sh, 0);
+    v(1.02, X - sh, 0);
+    this.fillPoly(g, lo, hi, 'rgba(0,0,0,.5)');
+
+    if (b.group === 'car') {
+      const roof = b.roof * K;
+      const nose = belt * 0.8;
+      if (sg) {
+        const sn = X + sg * hw * 0.9;
+        v(0, sl, lo3);
+        v(0, sl, belt);
+        v(0.86, sl, belt);
+        v(1, sn, nose);
+        v(1, sn, lo3);
+        this.fillPoly(g, lo, hi, b.side);
+        // darker rocker panel, bright shoulder line where the lamps catch it
+        const rk = lo3 + (belt - lo3) * 0.32;
+        v(0, sl, lo3);
+        v(0, sl, rk);
+        v(1, sn, rk);
+        v(1, sn, lo3);
+        this.fillPoly(g, lo, hi, b.sideLo);
+        v(0, sl, belt - 4 * K);
+        v(0, sl, belt);
+        v(0.86, sl, belt);
+        v(0.86, sl, belt - 4 * K);
+        this.fillPoly(g, lo, hi, b.top);
+        for (const wf of b.wheels) this.wheel(g, Z(wf), sl + sg * 2, b.wr * K, lo, hi);
+      }
+      // deck: trunk, shoulders and hood
+      v(0, X - hw, belt);
+      v(0, X + hw, belt);
+      v(0.86, X + hw, belt);
+      v(1, X + hw * 0.9, nose);
+      v(1, X - hw * 0.9, nose);
+      v(0.86, X - hw, belt);
+      this.fillPoly(g, lo, hi, b.top);
+      if (c.spr.kind === 'pickup') {
+        const bi = hw - 9 * K;
+        v(0.03, X - bi, belt + 1);
+        v(0.03, X + bi, belt + 1);
+        v(b.g0 - 0.02, X + bi, belt + 1);
+        v(b.g0 - 0.02, X - bi, belt + 1);
+        this.fillPoly(g, lo, hi, '#101216');
+      }
+      const cb = b.cb * K;
+      const ct = b.ct * K;
+      if (sg) {
+        // cabin side: painted pillars around dark side glass
+        const lb = X + sg * cb;
+        const lt = X + sg * ct;
+        v(b.g0, lb, belt);
+        v(b.g1, lt, roof);
+        v(b.r1, lt, roof);
+        v(b.c1, lb, belt);
+        this.fillPoly(g, lo, hi, b.side);
+        const gl = X + sg * (cb * 0.82 + ct * 0.18);
+        const gt = X + sg * (cb * 0.12 + ct * 0.88);
+        const h1 = belt + (roof - belt) * 0.14;
+        const h2 = roof - (roof - belt) * 0.14;
+        const ga = b.g0 + (b.g1 - b.g0) * 0.6 + 0.03;
+        const gb = b.g1 + 0.02;
+        const gc = b.r1 - 0.015;
+        const gd = b.c1 - (b.c1 - b.r1) * 0.35;
+        v(ga, gl, h1);
+        v(gb, gt, h2);
+        v(gc, gt, h2);
+        v(gd, gl, h1);
+        this.fillPoly(g, lo, hi, '#0a0f16');
+        // B-pillar
+        const m = (gb + gc) / 2;
+        v(m - 0.012, gl, h1);
+        v(m - 0.012, gt, h2);
+        v(m + 0.012, gt, h2);
+        v(m + 0.012, gl, h1);
+        this.fillPoly(g, lo, hi, b.side);
+      }
+      // rear glass, with a streak of reflected light
+      v(b.g0, X - cb, belt);
+      v(b.g0, X + cb, belt);
+      v(b.g1, X + ct, roof);
+      v(b.g1, X - ct, roof);
+      this.fillPoly(g, lo, hi, '#0c121a');
+      if (near) {
+        v(b.g0, X - cb * 0.56, belt);
+        v(b.g0, X - cb * 0.4, belt);
+        v(b.g1, X - ct * 0.16, roof);
+        v(b.g1, X - ct * 0.32, roof);
+        this.fillPoly(g, lo, hi, 'rgba(160,200,240,.16)');
+      }
+      // roof and its sheen
+      v(b.g1, X - ct, roof);
+      v(b.g1, X + ct, roof);
+      v(b.r1, X + ct, roof);
+      v(b.r1, X - ct, roof);
+      this.fillPoly(g, lo, hi, b.roofC);
+      if (near) {
+        g.globalAlpha = a * 0.45;
+        v(b.g1 + 0.02, X - ct * 0.42, roof);
+        v(b.g1 + 0.02, X - ct * 0.18, roof);
+        v(b.r1 - 0.03, X - ct * 0.18, roof);
+        v(b.r1 - 0.03, X - ct * 0.42, roof);
+        this.fillPoly(g, lo, hi, b.sheen);
+        g.globalAlpha = a;
+      }
+      if (near && sg) this.markers(g, Z(0.03), Z(0.95), sl, belt * 0.72, lo, hi, a);
+      return;
+    }
+
+    if (b.group === 'van') {
+      const bx = b.box1;
+      if (sg) {
+        const sn = X + sg * hw * 0.92;
+        v(0, sl, lo3);
+        v(0, sl, belt);
+        v(bx, sl, belt);
+        v(0.88, X + sg * hw * 0.96, belt * 0.58);
+        v(1, sn, belt * 0.5);
+        v(1, sn, lo3);
+        this.fillPoly(g, lo, hi, b.side);
+        v(0, sl, lo3);
+        v(0, sl, lo3 + (belt - lo3) * 0.2);
+        v(1, sn, lo3 + (belt - lo3) * 0.2);
+        v(1, sn, lo3);
+        this.fillPoly(g, lo, hi, b.sideLo);
+        // side windows: passenger glass and the cab door
+        for (const [z0, z1] of [
+          [0.1, 0.56],
+          [0.6, bx - 0.02],
+        ]) {
+          v(z0, sl, belt * 0.64);
+          v(z0, sl, belt * 0.9);
+          v(z1, sl, belt * 0.9);
+          v(z1, sl, belt * 0.64);
+          this.fillPoly(g, lo, hi, '#0a0f16');
+        }
+        for (const wf of b.wheels) this.wheel(g, Z(wf), sl + sg * 2, b.wr * K, lo, hi);
+      }
+      // hood, then the tall roof
+      v(0.88, X - hw * 0.96, belt * 0.58);
+      v(0.88, X + hw * 0.96, belt * 0.58);
+      v(1, X + hw * 0.9, belt * 0.5);
+      v(1, X - hw * 0.9, belt * 0.5);
+      this.fillPoly(g, lo, hi, b.top);
+      v(0, X - hw, belt);
+      v(0, X + hw, belt);
+      v(bx, X + hw, belt);
+      v(bx, X - hw, belt);
+      this.fillPoly(g, lo, hi, b.roofC);
+      if (near) {
+        g.globalAlpha = a * 0.4;
+        v(0.04, X - hw * 0.5, belt);
+        v(0.04, X - hw * 0.3, belt);
+        v(bx - 0.04, X - hw * 0.3, belt);
+        v(bx - 0.04, X - hw * 0.5, belt);
+        this.fillPoly(g, lo, hi, b.sheen);
+        g.globalAlpha = a;
+      }
+      if (near && sg) this.markers(g, Z(0.03), Z(0.95), sl, belt * 0.5, lo, hi, a);
+      return;
+    }
+
+    // Trucks: the cab (farther away) first, then the box over it.
+    const semi = c.spr.kind === 'semi';
+    const cabH = b.cabH * K;
+    const chw = b.cabHW * K;
+    const nz = semi ? 0.9 : 0.93;
+    const noseH = cabH * (semi ? 0.55 : 0.66);
+    const sc = this.sideFacing(Math.max(lo, Z(b.cab0)), X, chw);
+    if (sc) {
+      const cl = X + sc * chw;
+      v(b.cab0, cl, lo3 * 0.6);
+      v(b.cab0, cl, cabH);
+      v(nz - 0.015, cl, cabH);
+      v(nz + 0.01, cl, cabH * 0.86);
+      v(1, cl, noseH);
+      v(1, cl, lo3 * 0.6);
+      this.fillPoly(g, lo, hi, b.cabSide);
+      v(nz - 0.075, cl, cabH * 0.56);
+      v(nz - 0.075, cl, cabH * 0.86);
+      v(nz - 0.02, cl, cabH * 0.86);
+      v(nz + 0.002, cl, cabH * 0.56);
+      this.fillPoly(g, lo, hi, '#0a0f16');
+      for (const wf of b.wheels) if (wf > b.cab0) this.wheel(g, Z(wf), cl + sc * 2, b.wr * K, lo, hi);
+    }
+    v(b.cab0, X - chw, cabH);
+    v(b.cab0, X + chw, cabH);
+    v(nz - 0.015, X + chw, cabH);
+    v(nz - 0.015, X - chw, cabH);
+    this.fillPoly(g, lo, hi, b.cabTop);
+    v(nz + 0.01, X - chw, cabH * 0.86);
+    v(nz + 0.01, X + chw, cabH * 0.86);
+    v(1, X + chw, noseH);
+    v(1, X - chw, noseH);
+    this.fillPoly(g, lo, hi, b.cabTop);
+
+    const bx = b.box1;
+    if (sg) {
+      v(0, sl, lo3);
+      v(0, sl, belt);
+      v(bx, sl, belt);
+      v(bx, sl, lo3);
+      this.fillPoly(g, lo, hi, b.side);
+      if (near) {
+        // panel seams, the red-and-white conspicuity tape, and the under-run rail
+        for (let f = 0.1; f < bx - 0.04; f += 0.1) {
+          v(f, sl, lo3);
+          v(f, sl, belt);
+          v(f + 0.004, sl, belt);
+          v(f + 0.004, sl, lo3);
+          this.fillPoly(g, lo, hi, b.sideLo);
+        }
+        v(0.005, sl, lo3 + 5 * K);
+        v(0.005, sl, lo3 + 9 * K);
+        v(bx - 0.005, sl, lo3 + 9 * K);
+        v(bx - 0.005, sl, lo3 + 5 * K);
+        this.fillPoly(g, lo, hi, 'rgba(255,70,80,.8)');
+      }
+      for (const wf of b.wheels) if (wf < bx) this.wheel(g, Z(wf), sl + sg * 2, b.wr * K, lo, hi);
+    }
+    v(0, X - hw, belt);
+    v(0, X + hw, belt);
+    v(bx, X + hw, belt);
+    v(bx, X - hw, belt);
+    this.fillPoly(g, lo, hi, b.top);
+    if (near && sg) {
+      // amber side marker lights along the trailer
+      g.globalCompositeOperation = 'lighter';
+      for (const f of [0.02, bx / 2, bx - 0.02]) {
+        const z = Z(f);
+        if (z < lo || z > hi) continue;
+        this.proj(z, sl, belt - 8 * K);
+        const gs = (this.dfov / (z - this.pos)) * 260 * (W / 2);
+        g.drawImage(this.S.amber, this.pt[0] - gs / 2, this.pt[1] - gs / 2, gs, gs);
+      }
+      g.globalCompositeOperation = 'source-over';
+    }
+  }
+
+  /** Side marker lights: red at the back corner, amber at the front. */
+  private markers(g: CanvasRenderingContext2D, zr: number, zf: number, lat: number, h: number, lo: number, hi: number, a: number) {
+    g.globalCompositeOperation = 'lighter';
+    g.globalAlpha = a * 0.85;
+    for (const [z, spr] of [
+      [zr, this.S.red],
+      [zf, this.S.amber],
+    ] as const) {
+      if (z < lo || z > hi) continue;
+      this.proj(z, lat, h);
+      const gs = (this.dfov / Math.max(z - this.pos, NEAR)) * 200 * (W / 2);
+      g.drawImage(spr, this.pt[0] - gs / 2, this.pt[1] - gs / 2, gs, gs);
+    }
+
     g.globalCompositeOperation = 'source-over';
     g.globalAlpha = a;
   }
@@ -1064,7 +1472,9 @@ export class Game {
   private drawPlayer(g: CanvasRenderingContext2D, now: number) {
     const scale = (DEPTH * this.fov) / PLAYER_Z;
     const k = SPR_K * scale * (W / 2);
-    const sx = W / 2 + scale * (this.x * ROAD_W - this.camX) * (W / 2);
+    // Placed on the road exactly like traffic (curve included), so what you see lines up with what you hit.
+    this.proj(this.pos + PLAYER_Z, this.x * ROAD_W, 0);
+    const sx = this.pt[0];
     const sy = HORIZON + scale * CAM_H * (H / 2);
     const spr = this.sprite;
     const dw = SPRITE_W * k;
@@ -1198,29 +1608,34 @@ export class Game {
       g.fillRect(W / 2 - 60, 84, 120 * clamp(this.comboT / 3.4, 0, 1), 4);
     }
 
-    // Popups
-    for (const p of this.popups) {
-      const age = this.time - p.born;
-      const k = age / 1.3;
-      g.globalAlpha = Math.max(0, 1 - k * k);
-      g.textAlign = 'center';
-      const y = p.y - age * 50;
-      const s = age < 0.12 ? 0.6 + (age / 0.12) * 0.5 : 1.1 - Math.min(0.1, (age - 0.12) * 0.4);
-      g.save();
-      g.translate(p.x, y);
-      g.scale(s, s);
-      g.fillStyle = p.color;
-      g.font = `italic 900 ${p.big ? 26 : 20}px system-ui, Arial`;
-      g.shadowColor = 'rgba(0,0,0,.8)';
-      g.shadowBlur = 6;
-      g.fillText(p.text, 0, 0);
-      g.font = 'italic 800 16px system-ui, Arial';
-      g.fillStyle = '#ffffff';
-      g.fillText(p.sub, 0, 20);
-      g.restore();
+    // Callout feeds: small, at the left and right edges, newest at the bottom, sliding in from the side.
+    for (const side of [-1, 1] as const) {
+      let slot = 0;
+      for (let i = this.popups.length - 1; i >= 0; i--) {
+        const p = this.popups[i];
+        if (p.side !== side) continue;
+        const target = FEED_Y - slot * FEED_GAP;
+        p.y += (target - p.y) * 0.45;
+        const age = this.time - p.born;
+        const k = age / 1.3;
+        const fade = slot >= FEED_MAX ? 0 : Math.max(0, 1 - k * k * k);
+        slot++;
+        if (fade <= 0) continue;
+        const slide = (1 - Math.min(1, age / 0.14)) * 26 * side;
+        const edge = side < 0 ? 16 + slide : W - 16 + slide;
+        g.globalAlpha = fade;
+        g.fillStyle = p.color;
+        g.fillRect(side < 0 ? edge : edge - 3, p.y - 15, 3, 30);
+        g.textAlign = side < 0 ? 'left' : 'right';
+        const tx = side < 0 ? edge + 9 : edge - 9;
+        g.font = 'italic 900 15px system-ui, Arial';
+        g.fillText(p.text, tx, p.y - 1);
+        g.fillStyle = 'rgba(255,255,255,.85)';
+        g.font = 'italic 800 12px system-ui, Arial';
+        g.fillText(p.sub, tx, p.y + 13);
+      }
     }
     g.globalAlpha = 1;
-    g.shadowBlur = 0;
 
     // Speedometer, bottom right
     const cx = W - 78;
