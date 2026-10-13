@@ -1,0 +1,249 @@
+// Side profiles for the garage. Each car is hand-drawn on a 440×150 canvas, nose to the right.
+import {useId} from 'react';
+import type {CarDef, Paint} from '../game/cars';
+
+type Rim = 'five' | 'multi' | 'aero' | 'mesh' | 'turbine' | 'ring';
+
+interface Side {
+  body: string;
+  glass: string[];
+  wheels: [number, number];
+  r: number;
+  rim: Rim;
+  dark?: string[]; // trim, vents, wings
+  paintDark?: string[]; // body parts in the darker paint shade
+  tail: string;
+  head: string;
+  lines?: {d: string; color: string; w: number; glow?: boolean}[];
+}
+
+const SIDES: Record<string, Side> = {
+  pocket: {
+    body: 'M90 112 L88 86 Q88 74 98 70 L132 46 Q138 42 148 42 L262 42 Q274 42 284 50 L316 76 Q346 80 360 88 Q368 94 366 112 Z',
+    glass: ['M136 50 Q140 47 148 47 L216 47 L216 70 L118 70 Z', 'M222 47 L260 47 Q270 47 278 54 L300 70 L222 70 Z'],
+    wheels: [130, 312],
+    r: 27,
+    rim: 'five',
+    dark: ['M126 44 L102 52 L106 57 L134 48 Z', 'M330 108 L368 108 L368 112 L328 112 Z'],
+    tail: 'M88 78 L100 76 L100 88 L89 90 Z',
+    head: 'M338 82 L362 88 L361 95 L336 90 Z',
+    lines: [
+      {d: 'M219 72 L222 106', color: 'rgba(0,0,0,.35)', w: 1.5},
+      {d: 'M112 98 L334 98', color: '#ffffff', w: 3},
+    ],
+  },
+  ronin: {
+    body: 'M68 112 L68 88 Q70 76 84 74 L124 70 Q156 48 202 42 Q244 40 270 52 L298 68 Q344 72 372 80 Q384 86 382 112 Z',
+    glass: ['M134 68 Q160 52 202 47 Q238 46 258 56 L280 68 Z'],
+    wheels: [124, 318],
+    r: 28,
+    rim: 'multi',
+    dark: ['M94 72 L90 48 L96 48 L102 72 Z', 'M116 70 L112 48 L118 48 L124 70 Z', 'M66 44 L140 40 L142 48 L68 52 Z', 'M64 36 L71 36 L73 54 L66 54 Z', 'M150 106 L292 106 L292 110 L150 110 Z'],
+    tail: 'M69 80 A5 5 0 1 1 69 90 A5 5 0 1 1 69 80 Z',
+    head: 'M352 76 L378 82 L376 87 L350 82 Z',
+    lines: [{d: 'M200 70 L204 104', color: 'rgba(0,0,0,.35)', w: 1.5}],
+  },
+  vapor: {
+    body: 'M64 110 L62 90 Q64 78 80 74 L118 68 Q170 38 232 40 Q280 44 304 64 Q354 70 384 82 Q392 88 390 110 Z',
+    glass: ['M128 68 Q174 45 230 45 Q266 47 286 64 Z'],
+    wheels: [124, 320],
+    r: 28,
+    rim: 'aero',
+    dark: ['M70 104 L100 104 L104 110 L66 110 Z'],
+    tail: 'M62 82 L76 80 L76 86 L62 88 Z',
+    head: 'M356 80 L388 88 L386 91 L354 84 Z',
+    lines: [{d: 'M84 90 Q220 80 380 93', color: '#35f2ff', w: 2.5, glow: true}],
+  },
+  brute: {
+    body: 'M66 112 L66 80 L80 72 L130 70 L154 48 Q162 42 174 42 L238 42 Q250 42 258 50 L280 70 L360 72 Q376 74 380 82 L382 112 Z',
+    glass: ['M160 50 Q166 47 174 47 L206 47 L206 68 L140 68 Z', 'M212 47 L238 47 Q246 47 252 53 L268 68 L212 68 Z'],
+    wheels: [126, 318],
+    r: 29,
+    rim: 'five',
+    paintDark: ['M60 74 L92 70 L90 77 L62 79 Z'],
+    dark: ['M302 70 L338 70 L334 63 L308 63 Z'],
+    tail: 'M64 80 L76 80 L76 92 L64 92 Z',
+    head: 'M366 76 L382 80 L382 89 L366 87 Z',
+    lines: [
+      {d: 'M70 98 L378 98', color: '#ffffff', w: 3},
+      {d: 'M70 104 L378 104', color: '#ffffff', w: 3},
+    ],
+  },
+  kaiju: {
+    body: 'M58 112 L58 88 Q60 76 74 74 L116 70 Q150 48 198 42 Q238 40 264 54 L290 68 Q338 70 374 78 Q388 84 388 112 Z',
+    glass: ['M128 70 Q156 50 198 46 Q234 45 254 56 L276 70 Z'],
+    wheels: [124, 318],
+    r: 29,
+    rim: 'mesh',
+    paintDark: ['M84 112 Q88 74 124 70 Q160 72 166 112 Z', 'M278 112 Q284 74 318 70 Q354 72 360 112 Z'],
+    dark: [
+      'M44 30 L150 26 L152 36 L46 40 Z',
+      'M40 22 L49 22 L51 46 L42 46 Z',
+      'M104 72 Q96 52 106 36 L112 36 Q104 52 112 72 Z',
+      'M128 70 Q120 52 128 36 L134 36 Q128 52 136 70 Z',
+      'M238 80 L262 80 L256 98 L234 98 Z',
+      'M372 94 L394 90 L392 96 L372 98 Z',
+    ],
+    tail: 'M58 84 L66 80 L74 84 L74 90 L66 94 L58 90 Z',
+    head: 'M350 78 L384 84 L382 90 L348 84 Z',
+  },
+  stiletto: {
+    body: 'M56 108 L56 90 L74 80 L150 66 Q186 44 226 40 L254 42 Q292 54 334 72 L388 84 L392 108 Z',
+    glass: ['M164 66 Q194 47 228 46 L250 47 Q278 57 300 68 Z'],
+    wheels: [120, 322],
+    r: 27,
+    rim: 'turbine',
+    dark: ['M150 74 L212 72 L172 100 L150 100 Z', 'M52 70 L104 66 L104 72 L54 76 Z', 'M370 104 L396 104 L396 108 L366 108 Z'],
+    tail: 'M56 84 L74 80 L68 90 Z',
+    head: 'M360 80 L390 86 L388 90 L358 84 Z',
+    lines: [
+      {d: 'M96 78 L140 71', color: 'rgba(0,0,0,.4)', w: 2},
+      {d: 'M98 84 L142 77', color: 'rgba(0,0,0,.4)', w: 2},
+      {d: 'M100 90 L144 83', color: 'rgba(0,0,0,.4)', w: 2},
+    ],
+  },
+  phantom: {
+    body: 'M54 106 Q54 90 68 84 L140 70 Q192 36 250 40 Q304 46 334 68 Q372 76 392 88 L392 106 Z',
+    glass: ['M152 68 Q196 42 248 44 Q292 48 318 66 Z'],
+    wheels: [122, 322],
+    r: 28,
+    rim: 'aero',
+    dark: ['M60 100 L96 100 L98 106 L56 106 Z'],
+    tail: 'M54 90 L66 88 L66 92 L54 94 Z',
+    head: 'M364 82 L392 90 L390 93 L362 86 Z',
+    lines: [{d: 'M70 93 Q230 84 388 95', color: '#35f2ff', w: 2.5, glow: true}],
+  },
+  apex: {
+    body: 'M38 106 L38 92 L62 84 L150 76 Q188 48 226 44 Q264 44 292 62 L344 76 Q384 80 398 90 L400 106 Z',
+    glass: ['M168 74 Q196 52 226 49 Q258 49 280 62 L290 72 Z'],
+    wheels: [134, 330],
+    r: 28,
+    rim: 'aero',
+    paintDark: ['M58 86 Q130 74 196 44 L208 44 Q150 76 92 88 Z'],
+    dark: ['M368 104 L404 104 L404 108 L364 108 Z', 'M32 80 L72 78 L72 84 L34 86 Z', 'M214 82 L252 80 L246 94 L216 96 Z'],
+    tail: 'M38 88 L52 88 L52 92 L38 92 Z',
+    head: 'M366 82 L398 90 L396 93 L364 86 Z',
+  },
+  nova: {
+    body: 'M48 104 Q46 86 64 80 Q130 66 172 46 Q212 30 264 36 Q316 42 346 66 Q384 74 396 88 L394 104 Z',
+    glass: ['M164 54 Q206 32 260 38 Q300 44 322 60 Q262 54 202 60 Z'],
+    wheels: [128, 324],
+    r: 30,
+    rim: 'ring',
+    dark: ['M54 98 L90 98 L92 104 L50 104 Z'],
+    tail: 'M48 88 L62 86 L62 92 L48 94 Z',
+    head: 'M370 82 L396 90 L394 93 L368 86 Z',
+    lines: [{d: 'M62 94 Q200 72 300 58 Q352 54 392 86', color: '#ff3ad1', w: 3, glow: true}],
+  },
+  zero: {
+    body: 'M30 100 L32 84 L70 76 L176 70 Q222 52 264 52 Q300 54 322 66 L396 78 Q410 84 406 100 Z',
+    glass: ['M216 66 Q238 44 272 46 Q298 50 308 64 Z'],
+    wheels: [120, 334],
+    r: 27,
+    rim: 'turbine',
+    paintDark: ['M50 78 L80 32 L94 32 L90 76 Z', 'M64 78 L96 40 L106 40 L100 78 Z'],
+    dark: ['M180 80 L234 78 L226 94 L186 96 Z', 'M398 80 L432 85 L400 90 Z'],
+    tail: 'M30 82 A8 8 0 1 1 30 98 A8 8 0 1 1 30 82 Z',
+    head: 'M370 78 L400 82 L398 86 L368 82 Z',
+    lines: [{d: 'M70 88 L390 90', color: '#35f2ff', w: 2, glow: true}],
+  },
+};
+
+function Wheel({cx, cy, r, rim, accent}: {cx: number; cy: number; r: number; rim: Rim; accent: string}) {
+  const ri = r * 0.66;
+  const spokes = rim === 'five' ? 5 : rim === 'multi' ? 10 : rim === 'mesh' ? 14 : rim === 'turbine' ? 9 : 0;
+  return (
+    <g>
+      <circle cx={cx} cy={cy} r={r + 5} fill="#07090c" />
+      <circle cx={cx} cy={cy} r={r} fill="#14181e" />
+      <circle cx={cx} cy={cy} r={r - 3} fill="none" stroke="#232a33" strokeWidth="2" />
+      {rim === 'aero' ? (
+        <>
+          <circle cx={cx} cy={cy} r={ri} fill="#2a323d" />
+          <circle cx={cx} cy={cy} r={ri} fill="none" stroke={accent} strokeWidth="1.6" opacity=".85" />
+          <circle cx={cx} cy={cy} r={ri * 0.3} fill="#11151b" />
+        </>
+      ) : rim === 'ring' ? (
+        <>
+          <circle cx={cx} cy={cy} r={ri} fill="#0f1217" />
+          <circle cx={cx} cy={cy} r={ri - 1} fill="none" stroke={accent} strokeWidth="3" className="cs-glow" />
+          <circle cx={cx} cy={cy} r={ri * 0.4} fill="none" stroke={accent} strokeWidth="1.5" opacity=".6" />
+        </>
+      ) : (
+        <>
+          <circle cx={cx} cy={cy} r={ri} fill="#c9d2dc" />
+          <circle cx={cx} cy={cy} r={ri - 2} fill="#3a4350" />
+          {Array.from({length: spokes}, (_, i) => {
+            const a = (i / spokes) * Math.PI * 2;
+            const a2 = a + (rim === 'turbine' ? 0.5 : 0);
+            return (
+              <path
+                key={i}
+                d={`M${cx + Math.cos(a) * ri * 0.25} ${cy + Math.sin(a) * ri * 0.25} L${cx + Math.cos(a2) * (ri - 2)} ${cy + Math.sin(a2) * (ri - 2)}`}
+                stroke="#d8dfe7"
+                strokeWidth={rim === 'mesh' ? 1.4 : rim === 'multi' ? 2 : 4}
+                strokeLinecap="round"
+              />
+            );
+          })}
+          <circle cx={cx} cy={cy} r={ri * 0.24} fill="#c9d2dc" />
+          <circle cx={cx + ri * 0.55} cy={cy - ri * 0.35} r="3.2" fill="#ff2e4d" opacity=".85" />
+        </>
+      )}
+    </g>
+  );
+}
+
+export default function CarSide({car, paint, width = 440, className = ''}: {car: CarDef; paint: Paint; width?: number; className?: string}) {
+  const uid = useId().replace(/:/g, '');
+  const s = SIDES[car.id];
+  const accent = car.rear.accent ?? '#35f2ff';
+  return (
+    <svg viewBox="0 0 440 150" width={width} height={(width * 150) / 440} className={`car-side ${className}`} role="img" aria-label={`${car.name}, ${paint.name}`}>
+      <defs>
+        <linearGradient id={`p${uid}`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor={paint.light} />
+          <stop offset=".35" stopColor={paint.base} />
+          <stop offset="1" stopColor={paint.dark} />
+        </linearGradient>
+        <linearGradient id={`g${uid}`} x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#2a3a4e" />
+          <stop offset=".55" stopColor="#0c131c" />
+          <stop offset="1" stopColor="#1c2a3a" />
+        </linearGradient>
+        <linearGradient id={`s${uid}`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#000" stopOpacity="0" />
+          <stop offset=".55" stopColor="#000" stopOpacity="0" />
+          <stop offset="1" stopColor="#000" stopOpacity=".5" />
+        </linearGradient>
+        <filter id={`b${uid}`} x="-20%" y="-50%" width="140%" height="200%">
+          <feGaussianBlur stdDeviation="2.4" />
+        </filter>
+      </defs>
+      <ellipse cx="220" cy="128" rx="190" ry="7" fill="rgba(0,0,0,.6)" />
+      {s.paintDark?.map((d, i) => <path key={`pd${i}`} d={d} fill={paint.dark} />)}
+      <path d={s.body} fill={`url(#p${uid})`} />
+      <path d={s.body} fill={`url(#s${uid})`} />
+      <path d={s.body} fill="none" stroke="rgba(255,255,255,.22)" strokeWidth="1.2" />
+      {s.glass.map((d, i) => (
+        <path key={`g${i}`} d={d} fill={`url(#g${uid})`} />
+      ))}
+      {s.glass.map((d, i) => (
+        <path key={`gs${i}`} d={d} fill="none" stroke="rgba(170,210,255,.25)" strokeWidth="1" />
+      ))}
+      {s.dark?.map((d, i) => <path key={`d${i}`} d={d} fill="#11151b" />)}
+      {s.lines?.map((l, i) => (
+        <g key={`l${i}`}>
+          {l.glow && <path d={l.d} stroke={l.color} strokeWidth={l.w * 3} fill="none" opacity=".45" filter={`url(#b${uid})`} />}
+          <path d={l.d} stroke={l.color} strokeWidth={l.w} fill="none" strokeLinecap="round" />
+        </g>
+      ))}
+      <path d={s.tail} fill="#ff2e4d" />
+      <path d={s.tail} fill="#ff2e4d" filter={`url(#b${uid})`} opacity=".8" />
+      <path d={s.head} fill="#f4f8ff" />
+      <path d={s.head} fill="#dff3ff" filter={`url(#b${uid})`} opacity=".7" />
+      <Wheel cx={s.wheels[0]} cy={126 - s.r} r={s.r} rim={s.rim} accent={accent} />
+      <Wheel cx={s.wheels[1]} cy={126 - s.r} r={s.r} rim={s.rim} accent={accent} />
+    </svg>
+  );
+}

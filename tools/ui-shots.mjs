@@ -1,0 +1,64 @@
+// Dev-only: walk every screen with D-pad keys and screenshot it.
+import {chromium} from 'playwright';
+const [base = 'http://127.0.0.1:4174/', out = '.'] = process.argv.slice(2);
+const browser = await chromium.launch({headless: true, executablePath: '/opt/google/chrome/chrome'});
+const page = await browser.newPage({viewport: {width: 600, height: 600}});
+const errors = [];
+page.on('pageerror', e => errors.push(e.message));
+page.on('console', m => m.type() === 'error' && errors.push(m.text()));
+const focused = () => page.evaluate(() => document.activeElement?.getAttribute('aria-label') || document.activeElement?.textContent?.trim().slice(0, 30));
+await page.goto(base, {waitUntil: 'load'});
+await page.evaluate(() => {
+  localStorage.clear();
+  localStorage.setItem('cutup.save.v1', JSON.stringify({cash: 30000, xp: 9000}));
+});
+await page.reload({waitUntil: 'load'});
+await page.waitForTimeout(1500);
+console.log('home focus:', await focused());
+await page.screenshot({path: `${out}/u-home.png`});
+await page.keyboard.press('ArrowDown');
+await page.keyboard.press('Enter');
+await page.waitForTimeout(700);
+console.log('garage focus:', await focused());
+await page.keyboard.press('ArrowRight');
+await page.waitForTimeout(500);
+await page.screenshot({path: `${out}/u-garage1.png`});
+for (let i = 0; i < 5; i++) await page.keyboard.press('ArrowRight');
+await page.waitForTimeout(500);
+await page.screenshot({path: `${out}/u-garage6.png`});
+await page.keyboard.press('Escape');
+await page.waitForTimeout(500);
+console.log('back home focus:', await focused());
+await page.keyboard.press('ArrowDown');
+await page.keyboard.press('Enter');
+await page.waitForTimeout(600);
+await page.screenshot({path: `${out}/u-career.png`});
+await page.keyboard.press('Escape');
+await page.waitForTimeout(500);
+await page.keyboard.press('ArrowUp');
+await page.keyboard.press('ArrowUp');
+console.log('focus before drive:', await focused());
+await page.keyboard.press('Enter');
+await page.waitForTimeout(800);
+await page.screenshot({path: `${out}/u-tutorial.png`});
+await page.keyboard.press('Enter');
+await page.waitForTimeout(4200);
+await page.keyboard.press('ArrowLeft');
+await page.waitForTimeout(1500);
+await page.screenshot({path: `${out}/u-run.png`});
+await page.keyboard.press('Escape');
+await page.waitForTimeout(400);
+await page.screenshot({path: `${out}/u-pause.png`});
+console.log('pause focus:', await focused());
+await page.keyboard.press('Enter');
+await page.waitForTimeout(300);
+// Steer into traffic until we crash.
+for (let i = 0; i < 80 && !(await page.$('.results')); i++) {
+  await page.keyboard.press(i % 2 ? 'ArrowRight' : 'ArrowLeft');
+  await page.waitForTimeout(250);
+}
+await page.waitForTimeout(1800);
+await page.screenshot({path: `${out}/u-results.png`});
+console.log('results focus:', await focused());
+console.log(errors.length ? 'ERRORS ' + errors.join(' | ') : 'no errors');
+await browser.close();
