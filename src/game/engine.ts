@@ -17,8 +17,14 @@ const PLAYER_Z = 1180;
 const UPM = 88; // world units per second per mph
 const SPR_K = 3.8; // world units per sprite pixel
 export const LANES = [-0.75, -0.25, 0.25, 0.75];
-const CAR_HALF = 0.158; // normalised half-width used for collisions
-const PLAYER_LEN = 880;
+// From behind you can't see your own car's length, so collisions use the part of it that's
+// visible on screen: a traffic car only hits when its tail reaches your car's body in the
+// picture (≈ 420 units ahead of your rear bumper), never your hidden nose.
+const PLAYER_LEN = 420;
+// Collision boxes match what's drawn, shrunk slightly so a paint-scrape graze isn't a crash.
+const HIT_W = 0.88; // fraction of the drawn width
+const HIT_L = 0.9; // fraction of the drawn length
+const halfWidth = (spritePx: number) => ((spritePx / 2) * SPR_K) / ROAD_W;
 const WALL = 2400; // tunnel wall height
 
 // ---- Random -------------------------------------------------------------------
@@ -268,6 +274,7 @@ export class Game {
   private slow = 1;
   private lastNear = {t: -9, side: 0};
   private lean = 0;
+  private fov = 1; // eases up a touch during nitro
   private bestShown = false;
   // Adaptive quality: if frames run long on the glasses, draw less of the distance.
   private draw = DRAW;
@@ -569,24 +576,28 @@ export class Game {
       }
     }
 
-    // Collisions and near misses
+    // Collisions and near misses. Boxes are the drawn cars: the player spans from its rear
+    // bumper (pz) forward; traffic spans its full length around its centre.
     if (this.state === 'run' || this.state === 'countdown') {
+      const pHalf = halfWidth(this.opts.car.rear.w + this.opts.car.rear.flare * 2);
+      const pRear = pz + PLAYER_LEN * (1 - HIT_L) * 0.5;
+      const pFront = pz + PLAYER_LEN - PLAYER_LEN * (1 - HIT_L) * 0.5;
       for (const c of this.cars) {
-        const dzc = c.z - pz;
-        const reach = (c.spr.length + PLAYER_LEN) / 2;
+        const half = c.spr.length / 2;
+        const cRear = c.z - half * HIT_L;
+        const cFront = c.z + half * HIT_L;
         const dx = Math.abs(c.x - this.x);
-        if (Math.abs(dzc) < reach * 0.92 && dx < CAR_HALF * 2) {
+        const cHalf = halfWidth(c.spr.bodyW);
+        if (cRear < pFront && cFront > pRear && dx < (pHalf + cHalf) * HIT_W) {
           if (play) this.crash(c);
-          else {
-            // attract mode: the AI never crashes
-            c.z = pz + reach + 50;
-          }
+          else c.z = pFront + half + 60; // attract mode: the AI never crashes
           break;
         }
-        if (!c.passed && dzc < -reach * 0.4) {
+        // Scored once the car has dropped back past your car.
+        if (!c.passed && c.z + half < pz + PLAYER_LEN * 0.5) {
           c.passed = true;
           this.res.passed++;
-          if (play && this.state === 'run') this.nearMiss(c, dx);
+          if (play && this.state === 'run') this.nearMiss(c, dx - (pHalf + cHalf));
         }
       }
     }
@@ -610,6 +621,7 @@ export class Game {
     if (this.nextRow < this.pos + DRAW * SEG) this.spawnRow();
 
     // Effects
+    this.fov += ((this.nitroOn ? 1.06 : 1) - this.fov) * Math.min(1, dt * 4);
     this.shake = Math.max(0, this.shake - dt * 3);
     this.flash = Math.max(0, this.flash - dt * 2.5);
     this.bankFx = Math.max(0, this.bankFx - dt);
@@ -648,11 +660,11 @@ export class Game {
       }
   }
 
-  private nearMiss(c: Car, dx: number) {
-    const gap = dx - CAR_HALF * 2;
+  /** gap = clear space between the two cars' sides (normalised road units). */
+  private nearMiss(c: Car, gap: number) {
     const rel = this.speed - c.speed;
-    if (gap > 0.24 || rel < 12) return;
-    const tier = gap < 0.06 ? 2 : gap < 0.13 ? 1 : 0;
+    if (gap > 0.27 || rel < 12) return;
+    const tier = gap < 0.07 ? 2 : gap < 0.15 ? 1 : 0;
     const label = tier === 2 ? 'Insane' : tier === 1 ? 'Close call' : 'Near miss';
     this.combo++;
     this.comboT = 3.4;
@@ -747,7 +759,7 @@ export class Game {
     const pz = this.pos + PLAYER_Z;
     const playerY = this.segY(pz);
     const camY = playerY + CAM_H;
-    const nitroFov = this.nitroOn ? 1.06 : 1;
+    const nitroFov = this.fov;
 
     // Sky: a soft glow over the city, the moon, then the skyline with parallax.
     g.drawImage(S.skyGlow, 0, HORIZON - 140, W, 150);
@@ -790,6 +802,7 @@ export class Game {
     }
 
     // Draw back to front.
+    const near: [Car, number, number][] = [];
     const tunnelHere = tr.tunnel[Math.floor(pz / SEG) % N_SEG] > 0;
     for (let n = DRAWN - 1; n >= 0; n--) {
       if (this.pz[n] <= 30) continue;
@@ -841,7 +854,11 @@ export class Game {
       const b = this.buckets[n];
       if (b.length) {
         b.sort((p, q) => q.z - p.z);
-        for (const c of b) this.drawCar(g, c, n, base, a, now);
+        for (const c of b) {
+          // Cars nearer the camera than your rear bumper are drawn again over your car below.
+          if (c.z - c.spr.length / 2 < pz) near.push([c, n, a]);
+          else this.drawCar(g, c, n, base, a, now);
+        }
       }
     }
     g.globalAlpha = 1;
@@ -853,6 +870,8 @@ export class Game {
 
     this.drawSpeedLines(g, now);
     this.drawPlayer(g, now);
+    for (const [c, n, a] of near.reverse()) this.drawCar(g, c, n, base, a, now);
+    g.globalAlpha = 1;
     this.drawParticles(g);
     if (this.opts.mode === 'play') {
       if (this.hud) {
@@ -1043,7 +1062,7 @@ export class Game {
   }
 
   private drawPlayer(g: CanvasRenderingContext2D, now: number) {
-    const scale = DEPTH / PLAYER_Z;
+    const scale = (DEPTH * this.fov) / PLAYER_Z;
     const k = SPR_K * scale * (W / 2);
     const sx = W / 2 + scale * (this.x * ROAD_W - this.camX) * (W / 2);
     const sy = HORIZON + scale * CAM_H * (H / 2);

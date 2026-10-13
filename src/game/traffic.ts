@@ -12,6 +12,7 @@ export interface TrafficSprite {
   sigR: [number, number];
   length: number; // world length (units)
   slow: boolean; // trucks cruise slower
+  bodyW: number; // body width in sprite pixels (for collisions)
 }
 
 const COLORS = ['#c9d1da', '#8e99a6', '#4b5563', '#2f5aa8', '#a3282f', '#e5e7eb', '#1f6f5c', '#b8862b', '#6b4fa0', '#d6d0c4', '#3b4652', '#8c2f39'];
@@ -181,6 +182,7 @@ export function makeTrafficSprite(kind: TrafficKind, color: string): TrafficSpri
     sigR: [cx + half - 8 - lw / 2, lightY + lh / 2],
     length: s.len,
     slow: s.slow,
+    bodyW: s.w,
   };
 }
 
