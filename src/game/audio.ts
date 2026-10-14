@@ -113,7 +113,85 @@ export const sfx = {
     tone(1976, 0.08, 'square', 0.035);
     tone(2637, 0.3, 'square', 0.035, undefined, 0.07);
   },
+  // ---- pursuit ----
+  pitWarn: () => {
+    tone(880, 0.09, 'square', 0.05);
+    tone(880, 0.09, 'square', 0.05, undefined, 0.13);
+  },
+  screech: (pan: number) => hiss(0.55, 3200, 2400, 0.16, 6, pan, 0, 0.02),
+  copDown: (pan: number, vol: number) => {
+    hiss(0.9, 1600, 140, 0.5 * vol, 0.5, pan);
+    tone(70, 0.6, 'sine', 0.35 * vol, 30);
+  },
+  radio: () => {
+    hiss(0.12, 2600, 2600, 0.05, 3);
+    tone(1400, 0.05, 'square', 0.03, undefined, 0.02);
+    tone(1900, 0.05, 'square', 0.03, undefined, 0.09);
+  },
+  escape: () => [523, 659, 784, 1047, 1319, 1568].forEach((f, i) => tone(f, 0.3, 'triangle', 0.08, undefined, i * 0.07)),
+  busted: () => {
+    tone(330, 0.5, 'sawtooth', 0.05, 110);
+    [0, 0.18, 0.36].forEach(at => tone(988, 0.12, 'square', 0.04, 740, at));
+  },
 };
+
+// ---- Siren -------------------------------------------------------------------
+// A wail (slow sweep) that switches to a yelp (fast sweep) when a unit is right on you.
+export class Siren {
+  private o: OscillatorNode | null = null;
+  private lfo: OscillatorNode | null = null;
+  private gain: GainNode | null = null;
+  private pan: StereoPannerNode | null = null;
+
+  start() {
+    const c = ac();
+    if (!c || !master) return;
+    this.o = c.createOscillator();
+    this.o.type = 'sawtooth';
+    this.o.frequency.value = 1000;
+    this.lfo = c.createOscillator();
+    this.lfo.type = 'triangle';
+    this.lfo.frequency.value = 0.3;
+    const depth = c.createGain();
+    depth.gain.value = 380;
+    this.lfo.connect(depth).connect(this.o.frequency);
+    const f = c.createBiquadFilter();
+    f.type = 'lowpass';
+    f.frequency.value = 1900;
+    this.gain = c.createGain();
+    this.gain.gain.value = 0;
+    this.pan = c.createStereoPanner();
+    this.o.connect(f).connect(this.gain).connect(this.pan).connect(master);
+    this.o.start();
+    this.lfo.start();
+  }
+
+  /** level 0..1, pan −1..1, yelp when a unit is close. */
+  update(level: number, pan: number, yelp: boolean) {
+    if (!ctx || !this.gain || !this.pan || !this.lfo) return;
+    const t = ctx.currentTime;
+    this.gain.gain.setTargetAtTime(enabled ? level * 0.045 : 0, t, 0.15);
+    this.pan.pan.setTargetAtTime(pan * 0.8, t, 0.2);
+    this.lfo.frequency.setTargetAtTime(yelp ? 3.4 : 0.3, t, 0.1);
+  }
+
+  stop() {
+    if (!ctx || !this.gain) return;
+    this.gain.gain.setTargetAtTime(0, ctx.currentTime, 0.1);
+    const o = this.o;
+    const l = this.lfo;
+    setTimeout(() => {
+      try {
+        o?.stop();
+        l?.stop();
+      } catch {
+        /* already stopped */
+      }
+    }, 500);
+    this.o = this.lfo = null;
+    this.gain = null;
+  }
+}
 
 // ---- Engine ------------------------------------------------------------------
 // Two detuned oscillators through a low-pass filter; pitch follows RPM through six gears.

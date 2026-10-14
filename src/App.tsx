@@ -7,12 +7,21 @@ import Home from './ui/Home';
 const Garage = lazy(() => import('./ui/Garage'));
 const Career = lazy(() => import('./ui/Career'));
 const Drive = lazy(() => import('./ui/Drive'));
+const PursuitScreen = lazy(() => import('./ui/Pursuit'));
 
-export type Screen = 'home' | 'garage' | 'career' | 'drive';
+export type Screen = 'home' | 'garage' | 'career' | 'drive' | 'pursuit' | 'chase';
+const driving = (s: Screen) => s === 'drive' || s === 'chase';
 export type Go = (s: Screen) => void;
 
 /** The driving screen registers how it handles Back (pause, resume, or leave). */
 export const backHandler: {current: (() => boolean) | null} = {current: null};
+
+// While one screen swaps for the next (and lazy screens load), focus rests on the app root so it's
+// never left on <body>; each screen then moves it to its main control.
+const appRoot: {current: HTMLDivElement | null} = {current: null};
+function parkFocus() {
+  appRoot.current?.focus({preventScroll: true});
+}
 
 function settleFocus(apply: () => void) {
   requestAnimationFrame(apply);
@@ -41,9 +50,13 @@ export default function App() {
   useEffect(() => {
     const uninstall = installSpatialNav(() => {
       // Back: the driving screen decides first (pause / resume), otherwise go back a screen.
-      if (screenRef.current === 'drive' && backHandler.current?.()) return;
+      if (driving(screenRef.current) && backHandler.current?.()) {
+        parkFocus();
+        return;
+      }
       if (screenRef.current !== 'home') {
         sfx.back();
+        parkFocus();
         history.back();
       } else if (focusIsLost()) focusDefault();
     });
@@ -51,16 +64,17 @@ export default function App() {
     const onPop = (e: PopStateEvent) => {
       const next = ((e.state as {s?: Screen} | null)?.s ?? 'home') as Screen;
       // The glasses shell's Back while driving pauses instead of leaving.
-      if (screenRef.current === 'drive' && next !== 'drive' && backHandler.current?.()) {
-        push('drive');
+      if (driving(screenRef.current) && next !== screenRef.current && backHandler.current?.()) {
+        push(screenRef.current);
         return;
       }
+      if (next !== screenRef.current) parkFocus();
       setScreen(next);
     };
     window.addEventListener('popstate', onPop);
     const onKey = (e: KeyboardEvent) => {
       unlockAudio();
-      if (screenRef.current !== 'drive' && /^Arrow/.test(e.key)) sfx.move();
+      if (!driving(screenRef.current) && /^Arrow/.test(e.key)) sfx.move();
     };
     document.addEventListener('keydown', onKey, true);
     document.addEventListener('pointerdown', unlockAudio, true);
@@ -75,10 +89,11 @@ export default function App() {
   }, []);
 
   const go = useCallback<Go>(next => {
-    if (next === screenRef.current && next !== 'drive') return;
+    if (next === screenRef.current && !driving(next)) return;
     if (screenRef.current === 'home') lastButton.current = (document.activeElement as HTMLElement | null)?.dataset.nav ?? null;
     sfx.select();
-    if (next === 'drive') setRunKey(k => k + 1);
+    parkFocus();
+    if (driving(next)) setRunKey(k => k + 1);
     if (next === 'home') {
       history.back();
       return;
@@ -95,7 +110,7 @@ export default function App() {
     if (screen === 'home' && before !== 'home' && lastButton.current) {
       const id = lastButton.current;
       settleFocus(() => focusEl(document.querySelector<HTMLElement>(`[data-nav="${id}"]`)) || focusDefault());
-    } else if (screen !== 'drive') settleFocus(() => focusDefault());
+    } else if (!driving(screen)) settleFocus(() => focusDefault());
   }, [screen]);
 
   useEffect(() => {
@@ -103,12 +118,13 @@ export default function App() {
   }, []);
 
   return (
-    <div className="app">
+    <div className="app" ref={appRoot} tabIndex={-1} data-focus-root>
       {screen === 'home' && <Home go={go} />}
       <Suspense fallback={<div className="loading">Loading…</div>}>
         {screen === 'garage' && <Garage go={go} />}
         {screen === 'career' && <Career go={go} />}
-        {screen === 'drive' && <Drive key={runKey} go={go} restart={() => setRunKey(k => k + 1)} />}
+        {screen === 'pursuit' && <PursuitScreen go={go} />}
+        {driving(screen) && <Drive key={runKey} go={go} heat={screen === 'chase' ? s.pursuit.heat : 0} restart={() => setRunKey(k => k + 1)} />}
       </Suspense>
     </div>
   );

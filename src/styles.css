@@ -1152,3 +1152,381 @@ kbd {
 .drive-surface:focus-visible {
   outline: none;
 }
+
+/* ---------- Pursuit (heat select) ---------- */
+
+.pursuit {
+  position: relative;
+  height: 600px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 20px 14px;
+  overflow: hidden;
+  background: #000;
+}
+
+.pursuit > * {
+  position: relative;
+}
+
+.pursuit-bars {
+  position: absolute !important;
+  inset: 0;
+  pointer-events: none;
+}
+
+.pursuit-bars::before,
+.pursuit-bars::after {
+  content: '';
+  position: absolute;
+  top: -120px;
+  width: 420px;
+  height: 300px;
+  border-radius: 50%;
+  filter: blur(10px);
+  animation: lightbar 0.9s steps(1) infinite;
+}
+
+.pursuit-bars::before {
+  left: -170px;
+  background: radial-gradient(closest-side, rgba(255, 46, 77, 0.32), transparent);
+}
+
+.pursuit-bars::after {
+  right: -170px;
+  background: radial-gradient(closest-side, rgba(48, 110, 255, 0.36), transparent);
+  animation-delay: -0.45s;
+}
+
+@keyframes lightbar {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.heat-hero {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  text-align: center;
+}
+
+.heat-stars {
+  display: flex;
+  gap: 6px;
+  color: rgba(255, 255, 255, 0.22);
+}
+
+.heat-stars .is-on {
+  color: var(--gold);
+  filter: drop-shadow(0 0 8px rgba(255, 207, 74, 0.55));
+}
+
+.heat-hero h2 {
+  margin: 2px 0 0;
+  font-size: 34px;
+  font-weight: 900;
+  font-style: italic;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+}
+
+.heat-hero p {
+  margin: 0;
+  max-width: 420px;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.heat-row {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+}
+
+.heat-tile {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 1px;
+  height: 76px;
+  border-radius: 14px;
+  background: rgba(12, 16, 23, 0.92);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  transition: transform 0.14s ease-out, box-shadow 0.14s;
+}
+
+.heat-tile b {
+  font-size: 26px;
+  font-weight: 900;
+  font-style: italic;
+  line-height: 1;
+}
+
+.heat-tile-stars {
+  font-size: 9px;
+  letter-spacing: 1px;
+  color: var(--gold);
+}
+
+.heat-tile small {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10.5px;
+  font-weight: 800;
+  color: var(--muted);
+}
+
+.heat-tile .heat-done {
+  color: var(--volt);
+}
+
+.heat-tile.is-on {
+  box-shadow: inset 0 0 0 2px var(--red), 0 0 0 0 transparent;
+  background: linear-gradient(180deg, rgba(255, 46, 77, 0.16), rgba(48, 110, 255, 0.16));
+}
+
+.heat-tile:focus {
+  outline: none;
+  transform: translateY(-3px);
+  box-shadow: inset 0 0 0 2px #fff, 0 0 22px rgba(255, 46, 77, 0.35), 0 0 22px rgba(48, 110, 255, 0.35);
+}
+
+.heat-tile.is-locked {
+  color: var(--faint);
+}
+
+.heat-tile.is-locked .heat-tile-stars {
+  color: var(--faint);
+}
+
+.heat-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.hs {
+  display: grid;
+  padding: 7px 12px;
+  border-radius: 11px;
+  background: var(--p1);
+}
+
+.hs small {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.hs b {
+  font-size: 16px;
+  font-weight: 900;
+  font-style: italic;
+  font-variant-numeric: tabular-nums;
+}
+
+.hs b em {
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+  color: var(--muted);
+}
+
+.hs b.warn {
+  color: var(--red);
+}
+
+.hs b.gold {
+  color: var(--gold);
+}
+
+.heat-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tag {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--p2);
+  font-size: 11px;
+  font-weight: 800;
+  color: #c3cfde;
+}
+
+.tag.is-heli {
+  color: var(--amber);
+}
+
+.tag.is-gold {
+  color: var(--gold);
+}
+
+.action-btn.is-chase {
+  margin-top: auto;
+  background: linear-gradient(90deg, #e8243f 0%, #7b2fd0 50%, #2e5bff 100%);
+  color: #fff;
+}
+
+.action-btn.is-chase small {
+  font-size: 11.5px;
+  font-style: normal;
+  font-weight: 800;
+  opacity: 0.8;
+}
+
+.heat-note {
+  margin: -2px 0 0;
+  text-align: center;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+/* Home: the pursuit entry */
+.menu-btn.is-pursuit svg {
+  color: var(--red);
+  animation: sirenIcon 0.8s steps(1) infinite;
+}
+
+@keyframes sirenIcon {
+  50% {
+    color: #4d8dff;
+  }
+}
+
+.menu-btn.is-pursuit {
+  background:
+    linear-gradient(90deg, rgba(255, 46, 77, 0.2), rgba(48, 110, 255, 0.2)),
+    rgba(10, 14, 21, 0.86);
+}
+
+/* Results: pursuit outcome */
+.res-head b.is-escaped {
+  color: var(--volt);
+  text-shadow: 0 0 24px rgba(53, 242, 255, 0.45);
+}
+
+.res-head .res-outcome {
+  font-size: 15px;
+  font-weight: 900;
+  font-style: italic;
+  letter-spacing: 0.04em;
+}
+
+.res-outcome.is-escaped {
+  color: var(--volt);
+}
+
+.res-outcome.is-busted {
+  color: var(--red);
+  animation: bustFlash 0.5s steps(1) infinite;
+}
+
+@keyframes bustFlash {
+  50% {
+    color: #4d8dff;
+  }
+}
+
+.res-cash b.is-lost {
+  color: var(--faint);
+  text-decoration: line-through;
+}
+
+.vs {
+  display: grid;
+  gap: 7px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--p1);
+}
+
+.vs-row {
+  display: grid;
+  grid-template-columns: 92px 1fr 150px;
+  align-items: center;
+  gap: 10px;
+}
+
+.vs-row span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  font-weight: 800;
+  color: #c3cfde;
+}
+
+.vs-row b {
+  font-size: 13.5px;
+  font-weight: 900;
+  font-style: italic;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.vs-row b em {
+  font-size: 10.5px;
+  font-style: normal;
+  font-weight: 800;
+  color: var(--volt);
+}
+
+.vs-row b.warn {
+  color: var(--red);
+}
+
+.vs-track {
+  position: relative;
+  height: 8px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.vs-track i {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: 99px;
+}
+
+.vs-nitro {
+  background: rgba(53, 242, 255, 0.28);
+}
+
+.vs-you {
+  background: var(--volt);
+}
+
+.vs-cop {
+  background: linear-gradient(90deg, #e8243f, #2e5bff);
+}
+
+.heat-record {
+  margin: -2px 0 0;
+  text-align: center;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--faint);
+}
+
+.heat-note.is-peek {
+  color: var(--amber);
+}
+
+.app:focus,
+.app:focus-visible {
+  outline: none;
+}

@@ -5,7 +5,7 @@ import type {RunResult} from '../game/engine';
 
 const KEY = 'cutup.save.v1';
 
-export type MissionStat = 'nearMisses' | 'topSpeed' | 'score' | 'bestCombo' | 'insane' | 'distance' | 'threads' | 'nitros' | 'close';
+export type MissionStat = 'nearMisses' | 'topSpeed' | 'score' | 'bestCombo' | 'insane' | 'distance' | 'threads' | 'nitros' | 'close' | 'heat';
 
 export interface Mission {
   id: string;
@@ -26,6 +26,16 @@ export interface Save {
   missions: Mission[];
   missionTier: Record<string, number>;
   settings: {sound: boolean; units: 'mph' | 'kmh'};
+  seenTutorial: boolean;
+  pursuit: Pursuit;
+}
+
+export interface Pursuit {
+  unlocked: number; // highest heat you can start
+  heat: number; // last heat picked
+  escapes: number[]; // per heat
+  best: number[]; // best escaped score per heat
+  busts: number;
   seenTutorial: boolean;
 }
 
@@ -55,6 +65,7 @@ const MISSION_DEFS: {id: string; stat: MissionStat; goals: number[]}[] = [
   {id: 'thread', stat: 'threads', goals: [1, 3, 6]},
   {id: 'nitro', stat: 'nitros', goals: [2, 4, 7]},
   {id: 'close', stat: 'close', goals: [3, 8, 15, 25]},
+  {id: 'heat', stat: 'heat', goals: [1, 2, 3, 4, 5]},
 ];
 
 export function missionText(m: Mission, units: 'mph' | 'kmh' = 'mph'): string {
@@ -78,6 +89,8 @@ export function missionText(m: Mission, units: 'mph' | 'kmh' = 'mph'): string {
       return `Use nitro ${n} times in one run`;
     case 'close':
       return `Get ${n} close calls in one run`;
+    case 'heat':
+      return `Escape the police at heat ${n} or higher`;
   }
 }
 
@@ -109,6 +122,7 @@ function initial(): Save {
     missionTier: {},
     settings: {sound: true, units: 'mph'},
     seenTutorial: false,
+    pursuit: {unlocked: 1, heat: 1, escapes: [0, 0, 0, 0, 0], best: [0, 0, 0, 0, 0], busts: 0, seenTutorial: false},
   };
   s.missions = [makeMission(0, 0), makeMission(1, 0), makeMission(4, 0)];
   return s;
@@ -118,7 +132,9 @@ function load(): Save {
   try {
     const raw = localStorage.getItem(KEY);
     if (raw) {
-      const s = {...initial(), ...JSON.parse(raw)} as Save;
+      const base = initial();
+      const s = {...base, ...JSON.parse(raw)} as Save;
+      s.pursuit = {...base.pursuit, ...s.pursuit};
       if (!s.owned.includes(s.car)) s.car = s.owned[0] ?? 'pocket';
       return s;
     }
@@ -164,6 +180,8 @@ export interface RunReward {
   xpBefore: number;
   unlocks: string[]; // car names newly available to buy
   newBest: boolean;
+  lostCash: number; // pursuit: the payout lost to a bust
+  heatUnlocked: number; // pursuit: a newly unlocked heat level (0 = none)
 }
 
 export const save = {
@@ -193,10 +211,19 @@ export const save = {
   seenTutorial() {
     if (!state.seenTutorial) set({...state, seenTutorial: true});
   },
+  seenPursuitTutorial() {
+    if (!state.pursuit.seenTutorial) set({...state, pursuit: {...state.pursuit, seenTutorial: true}});
+  },
+  setHeat(h: number) {
+    if (h >= 1 && h <= state.pursuit.unlocked && h !== state.pursuit.heat) set({...state, pursuit: {...state.pursuit, heat: h}});
+  },
 
   /** Apply a finished run: pay out, level up, tick missions, record bests. */
   finishRun(r: RunResult): RunReward {
-    const cash = Math.round(r.score / 10);
+    // A bust (or wreck) in a pursuit forfeits the whole chase payout; XP still counts.
+    const busted = r.heat > 0 && !r.escaped;
+    const earned = Math.round(r.score / 10);
+    const cash = busted ? 0 : earned;
     const xp = Math.round(r.score / 7) + Math.round(r.distance * 120);
     const before = levelOf(state.xp).level;
     const stats: Record<MissionStat, number> = {
@@ -209,6 +236,7 @@ export const save = {
       threads: r.threads,
       nitros: r.nitros,
       close: r.close,
+      heat: r.escaped ? r.heat : 0,
     };
     const done = state.missions.filter(m => stats[m.stat] >= m.goal);
     const missionCash = done.reduce((s, m) => s + m.cash, 0);
@@ -224,14 +252,29 @@ export const save = {
     let levelCash = 0;
     for (let l = before + 1; l <= after; l++) levelCash += levelReward(l);
     const unlocks = CARS.filter(c => c.level > before && c.level <= after).map(c => c.name);
-    const newBest = r.score > state.best.score;
+    const newBest = !busted && r.score > state.best.score;
+    const P = state.pursuit;
+    let heatUnlocked = 0;
+    let pursuit = P;
+    if (r.heat > 0) {
+      const i = r.heat - 1;
+      if (r.escaped && r.heat === P.unlocked && P.unlocked < 5) heatUnlocked = P.unlocked + 1;
+      pursuit = {
+        ...P,
+        unlocked: Math.max(P.unlocked, heatUnlocked),
+        escapes: P.escapes.map((v, k) => (k === i && r.escaped ? v + 1 : v)),
+        best: P.best.map((v, k) => (k === i && r.escaped ? Math.max(v, r.score) : v)),
+        busts: P.busts + (busted ? 1 : 0),
+      };
+    }
     next = {
       ...next,
+      pursuit,
       missions,
       xp: totalXp,
       cash: state.cash + cash + missionCash + levelCash,
       best: {
-        score: Math.max(state.best.score, r.score),
+        score: busted ? state.best.score : Math.max(state.best.score, r.score),
         distance: Math.max(state.best.distance, r.distance),
         speed: Math.max(state.best.speed, r.topSpeed),
         combo: Math.max(state.best.combo, r.bestCombo),
@@ -244,7 +287,7 @@ export const save = {
         cashEarned: state.totals.cashEarned + cash + missionCash + levelCash,
       },
     };
-    const reward: RunReward = {result: r, cash, xp, missionsDone: done, missionCash, missionXp, levelBefore: before, levelAfter: after, levelCash, xpBefore: state.xp, unlocks, newBest};
+    const reward: RunReward = {result: r, cash, xp, missionsDone: done, missionCash, missionXp, levelBefore: before, levelAfter: after, levelCash, xpBefore: state.xp, unlocks, newBest, lostCash: busted ? earned : 0, heatUnlocked};
     set(next);
     return reward;
   },

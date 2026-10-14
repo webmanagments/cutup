@@ -1,7 +1,7 @@
 // Traffic vehicles (rear views) and roadside scenery sprites, pre-rendered once.
 import {SPRITE_W} from './cars';
 
-export type TrafficKind = 'sedan' | 'hatch' | 'suv' | 'pickup' | 'van' | 'box' | 'semi';
+export type TrafficKind = 'sedan' | 'hatch' | 'suv' | 'pickup' | 'van' | 'box' | 'semi' | 'police';
 
 export interface TrafficSprite {
   kind: TrafficKind;
@@ -43,6 +43,7 @@ export interface Body3D {
   sheen: string;
   cabSide: string;
   cabTop: string;
+  doors?: string; // police: white door panels
 }
 
 const COLORS = ['#c9d1da', '#8e99a6', '#4b5563', '#2f5aa8', '#a3282f', '#e5e7eb', '#1f6f5c', '#b8862b', '#6b4fa0', '#d6d0c4', '#3b4652', '#8c2f39'];
@@ -55,6 +56,7 @@ const SPEC: Record<TrafficKind, {w: number; body: number; cab: number; glass: nu
   van: {w: 184, body: 112, cab: 0, glass: 0, h: 180, len: 1250, slow: true},
   box: {w: 204, body: 160, cab: 0, glass: 0, h: 220, len: 1900, slow: true},
   semi: {w: 212, body: 176, cab: 0, glass: 0, h: 236, len: 2700, slow: true},
+  police: {w: 178, body: 54, cab: 36, glass: 26, h: 168, len: 1000, slow: false},
 };
 
 function rr(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
@@ -110,6 +112,7 @@ function bodyOf(kind: TrafficKind, color: string, cab: string): Body3D {
   if (kind === 'pickup') Object.assign(b, {g0: 0.42, g1: 0.435, r1: 0.66, c1: 0.78});
   if (kind === 'van') Object.assign(b, {box1: 0.8, wheels: [0.15, 0.84]});
   if (kind === 'box') Object.assign(b, {box1: 0.72, cab0: 0.74, cabH: belt * 0.64, cabHW: hw * 0.95, wheels: [0.12, 0.86], wr: s.w * 0.15});
+  if (kind === 'police') Object.assign(b, {g0: 0.27, g1: 0.41, r1: 0.64, c1: 0.79, roofC: '#e6ebf1', sheen: '#ffffff', doors: '#c9d0d9', top: '#23272e'});
   if (kind === 'semi') Object.assign(b, {box1: 0.74, cab0: 0.775, cabH: belt * 0.86, cabHW: hw * 0.9, wheels: [0.05, 0.11, 0.81, 0.87, 0.965], wr: s.w * 0.15});
   return b;
 }
@@ -219,6 +222,27 @@ export function makeTrafficSprite(kind: TrafficKind, color: string, cabColor = c
     g.lineTo(cx - cabW / 5 - 8, bodyTop - 3);
     g.stroke();
     }
+    if (kind === 'police') {
+      // the light bar sits on the roof (the 3D cabin draws its own up close)
+      if (withCab) {
+        const cabTop = bodyTop - s.cab;
+        g.fillStyle = '#0b0d11';
+        rr(g, cx - 46, cabTop - 9, 92, 10, 3);
+        g.fill();
+        g.fillStyle = '#5a1020';
+        rr(g, cx - 43, cabTop - 7, 40, 6, 2);
+        g.fill();
+        g.fillStyle = '#10255a';
+        rr(g, cx + 3, cabTop - 7, 40, 6, 2);
+        g.fill();
+      }
+      g.fillStyle = '#e9eef4';
+      g.font = 'italic 900 13px system-ui, Arial';
+      g.textAlign = 'center';
+      g.fillText('POLICE', cx, bodyTop + 26);
+      g.fillStyle = 'rgba(233,238,244,.85)';
+      g.fillRect(cx - half + 4, bodyTop + 4, s.w - 8, 3);
+    }
     if (kind === 'pickup') {
       g.fillStyle = shade(color, 0.7);
       g.fillRect(cx - half + 8, bodyTop + 6, s.w - 16, 4);
@@ -273,6 +297,12 @@ export function makeTrafficSprite(kind: TrafficKind, color: string, cabColor = c
     base,
     body: bodyOf(kind, color, cabColor),
   };
+}
+
+let police: TrafficSprite | null = null;
+/** The pursuit cruiser: black and white with a roof light bar. */
+export function policeSprite(): TrafficSprite {
+  return (police ??= makeTrafficSprite('police', '#15181e'));
 }
 
 const KINDS: TrafficKind[] = ['sedan', 'sedan', 'sedan', 'hatch', 'hatch', 'suv', 'suv', 'pickup', 'van', 'box', 'semi'];

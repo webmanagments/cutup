@@ -160,6 +160,7 @@ function navigate(dir: Dir) {
 export function focusIsLost(): boolean {
   const a = document.activeElement as HTMLElement | null;
   if (!a || a === document.body || a === document.documentElement) return true;
+  if (a.hasAttribute('data-focus-root')) return true; // parked during a screen change
   const scope = activeScope();
   return !scope || a === scope || !scope.contains(a);
 }

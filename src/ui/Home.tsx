@@ -4,7 +4,7 @@ import {setSoundEnabled} from '../game/audio';
 import {carById, paintById, rating} from '../game/cars';
 import {Game} from '../game/engine';
 import {levelOf, money, save, useSave, fmt} from '../lib/save';
-import {Flag, GarageIcon, Gauge, Logo, Play, Sound} from './icons';
+import {Flag, GarageIcon, Gauge, Logo, Play, SirenIcon, Sound} from './icons';
 
 /** The live highway behind the menus: your car cruising through traffic on autopilot. */
 export function AttractRoad({carId, paintId}: {carId: string; paintId: string}) {
@@ -51,6 +51,13 @@ export default function Home({go}: {go: Go}) {
           <span>
             <b>Drive</b>
             <small>{s.best.score ? `Best ${fmt(s.best.score)}` : 'Hit the highway'}</small>
+          </span>
+        </button>
+        <button type="button" className="menu-btn is-pursuit" data-nav="pursuit" onClick={() => go('pursuit')}>
+          <SirenIcon size={20} />
+          <span>
+            <b>Pursuit</b>
+            <small>{s.pursuit.escapes.some(Boolean) ? `Heat ${s.pursuit.unlocked} unlocked` : 'Outrun the police'}</small>
           </span>
         </button>
         <button type="button" className="menu-btn" data-nav="garage" onClick={() => go('garage')}>

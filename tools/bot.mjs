@@ -2,7 +2,7 @@
 import {chromium} from 'playwright';
 const [base = 'http://127.0.0.1:4174/', runs = '6', skill = '0.8'] = process.argv.slice(2);
 const browser = await chromium.launch({headless: true, executablePath: '/opt/google/chrome/chrome'});
-for (const car of ['pocket', 'kaiju', 'zero']) {
+for (const car of (process.env.CARS ?? 'pocket,kaiju,zero').split(',')) {
   const page = await browser.newPage({viewport: {width: 600, height: 600}});
   await page.goto(`${base}?drive&car=${car}`, {waitUntil: 'load'});
   await page.waitForTimeout(500);

@@ -9,7 +9,7 @@ export default function DriveTest() {
   useEffect(() => {
     const q = new URLSearchParams(location.search);
     const car = carById(q.get('car') ?? 'pocket');
-    const game = new Game(ref.current!, {car, paint: paintById(q.get('paint') ?? car.paint), mode: q.has('attract') ? 'attract' : 'play', units: 'mph', hud: hud.current!, onEnd: r => ((window as unknown as {result: unknown}).result = r)});
+    const game = new Game(ref.current!, {car, paint: paintById(q.get('paint') ?? car.paint), mode: q.has('attract') ? 'attract' : 'play', units: 'mph', hud: hud.current!, heat: Number(q.get('heat') ?? 0) || undefined, onEnd: r => ((window as unknown as {result: unknown}).result = r)});
     (window as unknown as {game: Game}).game = game;
     game.start();
     const key = (e: KeyboardEvent) => {

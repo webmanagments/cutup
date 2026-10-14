@@ -1,0 +1,47 @@
+// Dev-only: walk the pursuit flow with the D-pad and screenshot each step.
+import {chromium} from 'playwright';
+const [base = 'http://127.0.0.1:4174/', out = '.'] = process.argv.slice(2);
+const browser = await chromium.launch({headless: true, executablePath: '/opt/google/chrome/chrome'});
+const page = await browser.newPage({viewport: {width: 600, height: 600}});
+const errors = [];
+page.on('pageerror', e => errors.push(e.message));
+page.on('console', m => m.type() === 'error' && errors.push(m.text()));
+await page.goto(base + '?dev', {waitUntil: 'load'});
+await page.evaluate(() => localStorage.setItem('cutup.save.v1', JSON.stringify({cash: 90000, xp: 60000, owned: ['pocket', 'kaiju'], car: 'kaiju', seenTutorial: true, pursuit: {unlocked: 3, heat: 2, escapes: [3, 1, 0, 0, 0], best: [120000, 90000, 0, 0, 0], busts: 2, seenTutorial: false}})));
+await page.reload({waitUntil: 'load'});
+await page.waitForTimeout(1500);
+const key = async (k, n = 1) => { for (let i = 0; i < n; i++) { await page.keyboard.press(k); await page.waitForTimeout(220); } };
+await key('ArrowDown');
+await page.screenshot({path: `${out}/u1-home.png`});
+await key('Enter');
+await page.waitForTimeout(900);
+await page.screenshot({path: `${out}/u2-pursuit.png`});
+await key('ArrowRight');
+await page.waitForTimeout(400);
+await page.screenshot({path: `${out}/u3-heat3.png`});
+await key('ArrowRight');
+await page.screenshot({path: `${out}/u3b-locked.png`});
+await key('ArrowLeft');
+await key('Enter');
+await page.waitForTimeout(1200);
+await page.screenshot({path: `${out}/u4-tutorial.png`});
+await key('Enter');
+await page.waitForTimeout(7000);
+await page.screenshot({path: `${out}/u5-chase.png`});
+// force an escape to see the ending and results
+await page.evaluate(() => { const g = window.__game; g.escapeT = 99; for (const c of g.cars) if (c.cop) c.z -= 60000; });
+await page.waitForTimeout(700);
+await page.screenshot({path: `${out}/u6-escaped.png`});
+await page.waitForTimeout(3500);
+await page.screenshot({path: `${out}/u7-results.png`});
+// chase again and get busted
+await key('Enter');
+await page.waitForTimeout(6000);
+await page.evaluate(() => { const g = window.__game; const c = g.cars.find(c => c.cop); c.x = g.x; c.z = g.pos + 1180 + 300; });
+await page.waitForTimeout(500);
+await page.screenshot({path: `${out}/u8-busted.png`});
+await page.waitForTimeout(6500);
+await page.screenshot({path: `${out}/u9-busted-results.png`});
+console.log(errors.length ? 'ERRORS ' + errors.join(' | ') : 'no errors');
+console.log(JSON.stringify(await page.evaluate(() => JSON.parse(localStorage.getItem('cutup.save.v1')).pursuit)));
+await browser.close();

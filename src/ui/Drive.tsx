@@ -3,23 +3,25 @@ import {backHandler, type Go} from '../App';
 import {sfx} from '../game/audio';
 import {carById, paintById} from '../game/cars';
 import {Game, type RunResult} from '../game/engine';
+import {heatOf} from '../game/pursuit';
 import {fmt, levelOf, missionText, money, save, useSave, type RunReward} from '../lib/save';
 import {dirOf, focusDefault, focusEl, isEnter, setKeyCapture} from '../lib/spatial';
-import {Check, GarageIcon, Play} from './icons';
+import {Check, GarageIcon, Play, SirenIcon} from './icons';
 
-export default function Drive({go, restart}: {go: Go; restart: () => void}) {
+export default function Drive({go, restart, heat = 0}: {go: Go; restart: () => void; heat?: number}) {
   const s = useSave();
+  const H = heat ? heatOf(heat) : null;
   const canvas = useRef<HTMLCanvasElement>(null);
   const hud = useRef<HTMLCanvasElement>(null);
   const surface = useRef<HTMLButtonElement>(null);
   const lastNitro = useRef(0);
   const game = useRef<Game | null>(null);
-  const [phase, setPhase] = useState<'tutorial' | 'run' | 'paused' | 'results'>(() => (save.get().seenTutorial ? 'run' : 'tutorial'));
+  const [phase, setPhase] = useState<'tutorial' | 'run' | 'paused' | 'results'>(() => ((heat ? save.get().pursuit.seenTutorial : save.get().seenTutorial) ? 'run' : 'tutorial'));
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
   const [reward, setReward] = useState<RunReward | null>(null);
   const leaving = useRef(false);
-  const leave = (to: 'home' | 'garage') => {
+  const leave = (to: 'home' | 'garage' | 'pursuit') => {
     leaving.current = true;
     go(to);
   };
@@ -34,7 +36,8 @@ export default function Drive({go, restart}: {go: Go; restart: () => void}) {
       mode: 'play',
       units: st.settings.units,
       hud: hud.current!,
-      best: st.best.score,
+      best: heat ? undefined : st.best.score,
+      heat: heat || undefined,
       onEnd: (r: RunResult) => {
         const rw = save.finishRun(r);
         setReward(rw);
@@ -46,6 +49,7 @@ export default function Drive({go, restart}: {go: Go; restart: () => void}) {
       },
     });
     game.current = g;
+    if (/[?&]dev\b/.test(location.search)) (window as unknown as {__game: Game}).__game = g;
     if (phaseRef.current === 'run') g.start();
     else g.start(), g.setPaused(true);
     return () => {
@@ -101,6 +105,7 @@ export default function Drive({go, restart}: {go: Go; restart: () => void}) {
   }, [phase]);
 
   function begin() {
+    if (heat) save.seenPursuitTutorial();
     save.seenTutorial();
     sfx.select();
     game.current?.setPaused(false);
@@ -133,7 +138,37 @@ export default function Drive({go, restart}: {go: Go; restart: () => void}) {
         />
       )}
 
-      {phase === 'tutorial' && (
+      {phase === 'tutorial' && H && (
+        <div className="overlay">
+          <div className="card tutorial">
+            <h2>Lose the cops</h2>
+            <ul className="controls">
+              <li>
+                <kbd>Radar</kbd>
+                <span>Bottom left: units behind you. Red and blue glow = one is close.</span>
+              </li>
+              <li>
+                <kbd>PIT</kbd>
+                <span>A cop lines up beside you: swerve away or brake.</span>
+              </li>
+              <li>
+                <kbd>Nitro</kbd>
+                <span>Near misses refill it. Use it to break away.</span>
+              </li>
+            </ul>
+            <p>
+              Stay out of sight for <b>{H.escape} seconds</b> to escape and keep everything. The chase multiplier grows the longer you last. Get busted or wreck and you lose
+              the chase payout.
+            </p>
+            <p className="tip">Lead cops into traffic: they crash too.</p>
+            <button type="button" className="action-btn is-chase" data-autofocus onClick={begin}>
+              <Play size={18} /> Start chase
+            </button>
+          </div>
+        </div>
+      )}
+
+      {phase === 'tutorial' && !H && (
         <div className="overlay">
           <div className="card tutorial">
             <h2>How to cut up</h2>
@@ -186,7 +221,7 @@ export default function Drive({go, restart}: {go: Go; restart: () => void}) {
         </div>
       )}
 
-      {phase === 'results' && reward && <Results r={reward} units={s.settings.units} onAgain={restart} onGarage={() => leave('garage')} onHome={() => leave('home')} />}
+      {phase === 'results' && reward && <Results r={reward} units={s.settings.units} onAgain={restart} onGarage={() => leave(heat ? 'pursuit' : 'garage')} onHome={() => leave('home')} />}
     </div>
   );
 }
@@ -224,13 +259,31 @@ function Results({r, units, onAgain, onGarage, onHome}: {r: RunReward; units: 'm
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const kmh = units === 'kmh';
+  const chase = res.heat > 0;
+  const busted = chase && !res.escaped;
   return (
     <div className="overlay results">
       <div className="card res">
         <div className="res-head">
-          <span>{r.newBest ? 'New best score' : 'Run over'}</span>
-          <b className={r.newBest ? 'is-best' : ''}>{fmt(score)}</b>
+          {chase ? (
+            <span className={`res-outcome ${res.escaped ? 'is-escaped' : 'is-busted'}`}>
+              {res.escaped ? 'ESCAPED' : 'BUSTED'} · HEAT {res.heat} {'★'.repeat(res.heat)}
+            </span>
+          ) : (
+            <span>{r.newBest ? 'New best score' : 'Run over'}</span>
+          )}
+          <b className={chase ? (res.escaped ? 'is-escaped' : '') : r.newBest ? 'is-best' : ''}>{fmt(score)}</b>
         </div>
+        {chase ? (
+          <div className="res-grid">
+            <Cell label="Chase time" value={`${Math.round(res.chaseTime)}s`} />
+            <Cell label="Multiplier" value={`×${res.peakMult.toFixed(2)}`} />
+            <Cell label="Escape bonus" value={res.escaped ? fmt(res.escapeBonus) : '—'} />
+            <Cell label="Cops wrecked" value={String(res.copsWrecked)} />
+            <Cell label="PITs dodged" value={String(res.pitsDodged)} />
+            <Cell label="Near misses" value={String(res.nearMisses)} />
+          </div>
+        ) : (
         <div className="res-grid">
           <Cell label="Distance" value={kmh ? `${(res.distance * 1.609).toFixed(2)} km` : `${res.distance.toFixed(2)} mi`} />
           <Cell label="Top speed" value={kmh ? `${Math.round(res.topSpeed * 1.609)} km/h` : `${res.topSpeed} mph`} />
@@ -239,11 +292,14 @@ function Results({r, units, onAgain, onGarage, onHome}: {r: RunReward; units: 'm
           <Cell label="Insane" value={String(res.insane)} />
           <Cell label="Threaded" value={String(res.threads)} />
         </div>
-        {res.lostCombo > 0 && <p className="res-lost">Lost in the crash: {fmt(res.lostCombo)} combo points</p>}
+        )}
+        {chase && !res.escaped && <p className="res-lost">{res.bustedBy === 'cop' ? 'Busted' : 'Wrecked in the chase'}: lost {money(r.lostCash)} payout</p>}
+        {!chase && res.lostCombo > 0 && <p className="res-lost">Lost in the crash: {fmt(res.lostCombo)} combo points</p>}
         <div className="res-rewards">
           <div className="res-cash">
-            <small>Earned</small>
-            <b>+{money(cash)}</b>
+            <small>{busted ? 'Payout lost' : 'Earned'}</small>
+            <b className={busted ? 'is-lost' : ''}>+{money(busted ? r.lostCash : cash)}</b>
+            {busted && r.missionCash + r.levelCash > 0 && <small>Missions still paid {money(r.missionCash + r.levelCash)}</small>}
           </div>
           <div className="res-xp">
             <div className="res-xp-top">
@@ -255,7 +311,7 @@ function Results({r, units, onAgain, onGarage, onHome}: {r: RunReward; units: 'm
             </div>
           </div>
         </div>
-        {(r.missionsDone.length > 0 || r.unlocks.length > 0) && (
+        {(r.missionsDone.length > 0 || r.unlocks.length > 0 || r.heatUnlocked > 0 || leveled) && (
           <ul className="res-list">
             {r.missionsDone.map(m => (
               <li key={m.id}>
@@ -268,14 +324,23 @@ function Results({r, units, onAgain, onGarage, onHome}: {r: RunReward; units: 'm
               </li>
             ))}
             {leveled && <li className="is-unlock">Level reward +{money(r.levelCash)}</li>}
+            {r.heatUnlocked > 0 && <li className="is-unlock">Heat {r.heatUnlocked} unlocked: {heatOf(r.heatUnlocked).name}</li>}
           </ul>
         )}
         <div className="res-actions">
-          <button type="button" className="action-btn is-go" data-autofocus onClick={onAgain}>
-            <Play size={18} /> Drive again
+          <button type="button" className={`action-btn ${chase ? 'is-chase' : 'is-go'}`} data-autofocus onClick={onAgain}>
+            <Play size={18} /> {chase ? 'Chase again' : 'Drive again'}
           </button>
           <button type="button" className="ghost-btn" onClick={onGarage}>
-            <GarageIcon size={16} /> Garage
+            {chase ? (
+              <>
+                <SirenIcon size={16} /> Heat
+              </>
+            ) : (
+              <>
+                <GarageIcon size={16} /> Garage
+              </>
+            )}
           </button>
           <button type="button" className="ghost-btn" onClick={onHome}>
             Menu

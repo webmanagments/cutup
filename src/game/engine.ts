@@ -1,7 +1,8 @@
 // CUT UP driving engine: pseudo-3D night highway, traffic, scoring and HUD on one canvas.
-import {Engine, sfx} from './audio';
+import {Engine, Siren, sfx} from './audio';
 import {carSprite, SPRITE_W, tune, type CarDef, type CarSprite, type Paint} from './cars';
-import {glowSprite, lampSprite, skylineSprite, trafficPool, type TrafficSprite} from './traffic';
+import {heatOf, type Heat} from './pursuit';
+import {glowSprite, lampSprite, policeSprite, skylineSprite, trafficPool, type TrafficSprite} from './traffic';
 
 // ---- World constants ------------------------------------------------------------
 export const W = 600;
@@ -114,6 +115,22 @@ interface Car {
   toX: number;
   changeT: number; // <0 when not changing lanes
   passed: boolean;
+  cop?: Cop;
+}
+
+// A police unit. Cops chase from behind, line up alongside for a PIT, ram you if they can't,
+// cut in from ahead at higher heat, and wreck if they misjudge traffic.
+interface Cop {
+  mode: 'block' | 'chase' | 'pit' | 'wreck';
+  t: number; // time in the current mode
+  dir: number; // PIT swerve direction
+  swerved: boolean;
+  cool: number; // until the next PIT attempt
+  laneCool: number;
+  hazard: Car | null; // the car ahead it last sized up
+  late: boolean; // it will react late to that car
+  phase: number; // light-bar phase
+  fixed: boolean; // roadblock unit: holds its lane
 }
 
 interface Particle {
@@ -154,6 +171,15 @@ export interface RunResult {
   passed: number;
   time: number;
   lostCombo: number;
+  // pursuit
+  heat: number; // 0 = normal run
+  escaped: boolean;
+  bustedBy: '' | 'cop' | 'traffic';
+  chaseTime: number;
+  peakMult: number;
+  copsWrecked: number;
+  pitsDodged: number;
+  escapeBonus: number;
 }
 
 export interface GameOptions {
@@ -163,6 +189,7 @@ export interface GameOptions {
   units: 'mph' | 'kmh';
   hud?: HTMLCanvasElement; // separate layer for the HUD (redrawn less often)
   best?: number; // personal best, for the mid-run "New best" moment
+  heat?: number; // 1–5 starts a police pursuit
   onEnd?: (r: RunResult) => void;
 }
 
@@ -174,6 +201,7 @@ const STATIC = {
   white: null as HTMLCanvasElement | null,
   red: null as HTMLCanvasElement | null,
   cyan: null as HTMLCanvasElement | null,
+  blue: null as HTMLCanvasElement | null,
   skyline: null as HTMLCanvasElement | null,
   skyGlow: null as HTMLCanvasElement | null,
   beam: null as HTMLCanvasElement | null,
@@ -197,6 +225,7 @@ function statics() {
     STATIC.white = glowSprite('rgba(255,244,220,1)');
     STATIC.red = glowSprite('rgba(255,46,77,1)');
     STATIC.cyan = glowSprite('rgba(53,242,255,1)');
+    STATIC.blue = glowSprite('rgba(48,110,255,1)');
     STATIC.skyline = skylineSprite();
     STATIC.skyGlow = canvasOf(8, 150, g => {
       const gr = g.createLinearGradient(0, 0, 0, 150);
@@ -282,7 +311,7 @@ export class Game {
   private popups: Popup[] = [];
   private skyX = 0;
   private time = 0;
-  private state: 'countdown' | 'run' | 'crash' | 'over' = 'countdown';
+  private state: 'countdown' | 'run' | 'crash' | 'escaped' | 'over' = 'countdown';
   private countT = 3;
   private crashT = 0;
   private spin = 0;
@@ -293,6 +322,20 @@ export class Game {
   private lean = 0;
   private fov = 1; // eases up a touch during nitro
   private bestShown = false;
+  // pursuit
+  private heat: Heat | null = null;
+  private chaseT = 0;
+  private mult = 1; // chase multiplier
+  private escapeT = 0; // seconds spent out of sight
+  private seen = true;
+  private backupT = 0;
+  private lastBlock = -99;
+  private endT = 0;
+  private siren: Siren | null = null;
+  private pitWarn = 0; // side of a lined-up PIT (-1 / 1), 0 = none
+  private bumper = 0; // a cop right behind you, 0..1
+  private copGlow = 0; // nearest cop behind, 0..1
+  private copSide = 0;
   // Adaptive quality: if frames run long on the glasses, draw less of the distance.
   private draw = DRAW;
   private slowFrames = 0;
@@ -305,7 +348,7 @@ export class Game {
   private comboT = 0;
   private bankFx = 0;
   private bankAmt = 0;
-  private res: RunResult = {score: 0, distance: 0, topSpeed: 0, nearMisses: 0, close: 0, insane: 0, threads: 0, bestCombo: 0, nitros: 0, passed: 0, time: 0, lostCombo: 0};
+  private res: RunResult = {score: 0, distance: 0, topSpeed: 0, nearMisses: 0, close: 0, insane: 0, threads: 0, bestCombo: 0, nitros: 0, passed: 0, time: 0, lostCombo: 0, heat: 0, escaped: false, bustedBy: '', chaseTime: 0, peakMult: 1, copsWrecked: 0, pitsDodged: 0, escapeBonus: 0};
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -332,6 +375,13 @@ export class Game {
       this.x = this.fromX = this.toX = LANES[2];
     } else this.speed = 30;
     this.seedTraffic();
+    if (opts.mode === 'play' && opts.heat) {
+      const H = (this.heat = heatOf(opts.heat));
+      this.res.heat = H.level;
+      this.backupT = H.backup;
+      const lanes = [0, 1, 2, 3].sort(() => rnd() - 0.5);
+      for (let i = 0; i < H.cops; i++) this.spawnCop(this.pos + PLAYER_Z - 4600 - i * 2600, lanes[i], 'chase');
+    }
   }
 
   // ---- lifecycle ----
@@ -343,6 +393,10 @@ export class Game {
       const pitch = 0.75 + (this.opts.car.stats.top - 140) / 300;
       this.engine = new Engine(pitch, electric);
       this.engine.start();
+      if (this.heat) {
+        this.siren = new Siren();
+        this.siren.start();
+      }
       sfx.count();
     }
     this.last = performance.now();
@@ -372,11 +426,14 @@ export class Game {
     cancelAnimationFrame(this.raf);
     this.engine?.stop();
     this.engine = null;
+    this.siren?.stop();
+    this.siren = null;
   }
 
   setPaused(p: boolean) {
     this.paused = p;
     if (p) this.engine?.update(0, 1, false, true);
+    if (p) this.siren?.update(0, 0, false);
     this.last = performance.now();
   }
 
@@ -397,7 +454,7 @@ export class Game {
   }
 
   nitro() {
-    if (this.state !== 'run' || this.paused || this.nitroOn) return;
+    if ((this.state !== 'run' && this.state !== 'escaped') || this.paused || this.nitroOn) return;
     if (this.nitroTank < 0.6) {
       sfx.deny();
       return;
@@ -441,6 +498,21 @@ export class Game {
     const closing = Math.max(45, (attract ? 108 : this.t.topMph) - 62) * UPM;
     const gap = Math.max(4200, closing * (attract ? 1.6 : 1.5 - diff * 0.62) * (0.8 + rnd() * 0.5));
     this.nextRow += gap;
+    const H = this.heat;
+    if (H && H.roadblock && this.state === 'run' && this.seen && this.chaseT - this.lastBlock > H.roadblock) {
+      // Rolling roadblock: cruisers side by side, lights on, always leaving a way through.
+      this.lastBlock = this.chaseT;
+      const k = H.level >= 5 ? 3 : 2;
+      const reachable = [0, 1, 2, 3].filter(l => this.prevOpen.some(o => Math.abs(o - l) <= 1));
+      const open = pick(reachable);
+      let lanes = [0, 1, 2, 3].filter(l => l !== open);
+      if (k === 2) lanes = lanes.sort(() => rnd() - 0.5).slice(0, 2);
+      lanes = lanes.filter(l => !this.cars.some(c => c.lane === l && Math.abs(c.z - z) < 2600));
+      this.prevOpen = [0, 1, 2, 3].filter(l => !lanes.includes(l));
+      for (const l of lanes) this.spawnCop(z, l, 'block', true);
+      this.nextRow += 1800;
+      return;
+    }
     const r = rnd();
     const k = attract ? (r < 0.6 ? 1 : 2) : r < 0.5 - diff * 0.25 ? 1 : r < 0.88 - diff * 0.12 ? 2 : 3;
     let lanes: number[];
@@ -502,7 +574,7 @@ export class Game {
     }
 
     // Speed
-    if (this.state === 'run') {
+    if (this.state === 'run' || this.state === 'escaped') {
       const top = play ? t.topMph * (this.nitroOn ? t.nitroBoost : 1) : 108;
       if (this.brakeT > 0) {
         this.brakeT -= dt;
@@ -523,7 +595,15 @@ export class Game {
       this.crashT += dt;
       this.spin += dt * 5 * Math.max(0.1, this.speed / 100);
       if (this.crashT > 0.9) this.slow = Math.min(1, this.slow + dt * 2);
-      if (this.crashT > 1.7 && this.state === 'crash') {
+      if (this.crashT > (this.heat ? 2.3 : 1.7) && this.state === 'crash') {
+        this.state = 'over';
+        this.finish();
+      }
+    }
+    if (this.state === 'escaped') {
+      this.endT += dt;
+      if (this.endT > 0.8) this.slow = Math.min(1, this.slow + dt * 1.5);
+      if (this.endT > 2.6) {
         this.state = 'over';
         this.finish();
       }
@@ -550,10 +630,11 @@ export class Game {
     const pz = this.pos + PLAYER_Z;
     const diff = this.difficulty();
     for (const c of this.cars) {
+      if (c.cop) continue; // police drive themselves (updateCops)
       // follow slower cars in the same lane
       let ahead = Infinity;
-      for (const o of this.cars) if (o !== c && o.lane === c.lane && o.z > c.z && o.z - c.z < ahead) ahead = o.z - c.z;
-      const want = ahead < 2200 ? Math.min(c.baseSpeed, this.cars.find(o => o.lane === c.lane && o.z - c.z === ahead)?.speed ?? c.baseSpeed) : c.baseSpeed;
+      for (const o of this.cars) if (o !== c && !o.cop && o.lane === c.lane && o.z > c.z && o.z - c.z < ahead) ahead = o.z - c.z;
+      const want = ahead < 2200 ? Math.min(c.baseSpeed, this.cars.find(o => !o.cop && o.lane === c.lane && o.z - c.z === ahead)?.speed ?? c.baseSpeed) : c.baseSpeed;
       c.speed += (want - c.speed) * Math.min(1, dt * 2);
       c.z += c.speed * UPM * dt;
       // lane changes, always signalled first
@@ -593,6 +674,8 @@ export class Game {
       }
     }
 
+    if (this.heat) this.updateCops(dt, pz);
+
     // Collisions and near misses. Boxes are the drawn cars: the player spans from its rear
     // bumper (pz) forward; traffic spans its full length around its centre.
     if (this.state === 'run' || this.state === 'countdown') {
@@ -625,7 +708,7 @@ export class Game {
       this.comboT -= dt;
       if (this.comboT <= 0) this.bank();
     }
-    if (this.state === 'run' && play && this.speed > 50) this.score += this.speed * dt * 0.6 * (this.nitroOn ? 1.5 : 1);
+    if (this.state === 'run' && play && this.speed > 50) this.score += this.speed * dt * 0.6 * (this.nitroOn ? 1.5 : 1) * this.mult;
     const best = this.opts.best ?? 0;
     if (play && !this.bestShown && best > 0 && this.score > best) {
       this.bestShown = true;
@@ -634,7 +717,13 @@ export class Game {
     }
 
     // Spawn / despawn
-    this.cars = this.cars.filter(c => c.z > this.pos - 600 && c.z < this.pos + DRAW * SEG + 6000);
+    const far = this.pos + DRAW * SEG + 6000;
+    const lost = this.heat ? this.heat.sight * 2.2 : 0;
+    this.cars = this.cars.filter(c => {
+      if (!c.cop) return c.z > this.pos - 600 && c.z < far;
+      // Cops behind you are still chasing; they drop out once they're hopelessly far back.
+      return c.cop.mode === 'wreck' ? c.z > this.pos - 5000 : c.z > pz - lost && c.z < far + 20000;
+    });
     if (this.nextRow < this.pos + DRAW * SEG) this.spawnRow();
 
     // Effects
@@ -652,6 +741,355 @@ export class Game {
     this.popups = this.popups.filter(p => this.time - p.born < 1.3);
 
     this.engine?.update(this.speed, t.topMph, this.nitroOn, this.brakeT > 0);
+  }
+
+  // ---- pursuit ----
+  private spawnCop(z: number, lane: number, mode: 'block' | 'chase', fixed = false) {
+    const spr = policeSprite();
+    const speed = mode === 'chase' ? Math.max(this.speed, 70) : fixed ? 50 : 56;
+    this.cars.push({
+      spr,
+      z,
+      x: LANES[lane],
+      lane,
+      speed,
+      baseSpeed: speed,
+      signal: 0,
+      signalT: 0,
+      fromX: LANES[lane],
+      toX: LANES[lane],
+      changeT: -1,
+      passed: false,
+      cop: {mode, t: 0, dir: 0, swerved: false, cool: 2.5, laneCool: 0, hazard: null, late: false, phase: rnd(), fixed},
+    });
+  }
+
+  /** Is lane l clear of other cars around car c (from `back` behind it to `front` ahead)? */
+  private laneFree(c: Car, l: number, back: number, front: number) {
+    const lx = LANES[l];
+    for (const o of this.cars) {
+      if (o === c) continue;
+      if (Math.abs(o.x - lx) > 0.36 && !(o.changeT >= 0 && Math.abs(o.toX - lx) < 0.36)) continue;
+      const dz = o.z - c.z;
+      if (dz > -back - o.spr.length / 2 && dz < front + o.spr.length / 2) return false;
+    }
+    return true;
+  }
+
+  /** Would moving into lane l put a cop straight into you (outside a PIT)? */
+  private playerNear(l: number, c: Car, pc: number) {
+    return Math.abs(this.x - LANES[l]) < 0.3 && Math.abs(pc - c.z) < 1500;
+  }
+
+  private copLane(c: Car, l: number) {
+    if (l < 0 || l > 3 || l === c.lane) return;
+    c.fromX = c.x;
+    c.toX = LANES[l];
+    c.lane = l;
+    c.changeT = 0;
+    c.cop!.laneCool = 0.9;
+  }
+
+  /** The nearest car ahead of a cop that it could run into. */
+  private copHazard(c: Car): Car | null {
+    let best: Car | null = null;
+    let bestGap = 14000;
+    const front = c.z + c.spr.length / 2;
+    for (const o of this.cars) {
+      if (o === c) continue;
+      const over = Math.abs(o.x - c.x) < 0.36 || (c.changeT >= 0 && Math.abs(o.x - c.toX) < 0.36);
+      if (!over) continue;
+      const gap = o.z - o.spr.length / 2 - front;
+      if (gap > -260 && gap < bestGap) {
+        bestGap = gap;
+        best = o;
+      }
+    }
+    return best;
+  }
+
+  private updateCops(dt: number, pz: number) {
+    const H = this.heat!;
+    const pc = pz + PLAYER_LEN / 2;
+    const top = this.t.topMph * H.speed;
+    const laneDur = 0.62 - H.level * 0.035;
+    let seen = false;
+    let chasers = 0;
+    let glow = 0;
+    let glowSide = 0;
+    this.pitWarn = 0;
+    this.bumper = 0;
+    for (const c of this.cars) if (c.cop && c.cop.mode !== 'wreck' && c.cop.mode !== 'block') chasers++;
+
+    for (const c of this.cars) {
+      const k = c.cop;
+      if (!k) continue;
+      const half = c.spr.length / 2;
+      // sideways motion (lane changes, PIT swerves, wreck slides)
+      if (c.changeT >= 0) {
+        c.changeT += dt / (k.mode === 'pit' ? 0.4 : k.mode === 'wreck' ? 0.9 : laneDur);
+        c.x = c.fromX + (c.toX - c.fromX) * ease(Math.min(1, c.changeT));
+        if (c.changeT >= 1) {
+          c.changeT = -1;
+          c.fromX = c.toX;
+        }
+      }
+      if (k.mode === 'wreck') {
+        k.t += dt;
+        c.speed = Math.max(0, c.speed - 85 * dt);
+        c.z += c.speed * UPM * dt;
+        continue;
+      }
+      const d = c.z - pc; // + ahead of you, − behind
+      if (this.state === 'countdown') {
+        c.speed = this.speed;
+        c.z += c.speed * UPM * dt;
+        continue;
+      }
+      if (d > -H.sight && d < H.sight * 0.75) seen = true;
+      if (d < 0 && d > -7000) {
+        const g = 1 - -d / 7000;
+        if (g > glow) {
+          glow = g;
+          glowSide = Math.sign(c.x - this.x);
+        }
+      }
+      k.cool -= dt;
+      k.laneCool -= dt;
+      k.t += dt;
+      const changing = c.changeT >= 0;
+      let want: number;
+      let hard = false;
+
+      if (k.mode === 'block') {
+        // Units ahead roll slowly with their lights on and drift across to cut you off.
+        want = c.baseSpeed;
+        if (!k.fixed && d > 0 && d < 13000 && !changing && k.laneCool <= 0 && c.lane !== this.lane) {
+          const l = c.lane + Math.sign(this.lane - c.lane);
+          if (this.laneFree(c, l, 1400, 1800)) this.copLane(c, l);
+        }
+        if (d < -half - 600 && chasers < H.max && this.state === 'run') {
+          k.mode = 'chase';
+          k.cool = 2.5;
+          chasers++;
+        }
+      } else {
+        // Get alongside you in a neighbouring lane (to PIT); if that's impossible, take your lane and ram.
+        let target = this.lane;
+        if (d > -9000) {
+          const opts = [this.lane - 1, this.lane + 1].filter(l => l >= 0 && l <= 3).sort((a, b) => Math.abs(a - c.lane) - Math.abs(b - c.lane));
+          target = opts.find(l => l === c.lane || this.laneFree(c, l, 1200, 2400)) ?? this.lane;
+        }
+        if (k.mode === 'chase' && !changing && k.laneCool <= 0 && c.lane !== target) {
+          const l = c.lane + Math.sign(target - c.lane);
+          if (this.laneFree(c, l, 1200, 2400) && !this.playerNear(l, c, pc)) this.copLane(c, l);
+        }
+        const inLane = Math.abs(c.x - this.x) < 0.3;
+        const goal = inLane ? -(half + PLAYER_LEN / 2) + 30 : 0;
+        // Close in fast from far back, but creep up the last stretch so you see them coming
+        // (a few seconds of "on your bumper" before a ram, a beat alongside before a PIT).
+        const creep = d > -4500 && d < 0 ? (inLane ? 13 : 24) : 60;
+        want = this.speed + clamp(((goal - d) / UPM) * 1.1, -55, creep);
+        if (inLane && d < 0 && d > -2600) this.bumper = Math.max(this.bumper, 1 + d / 2600);
+
+        const lat = this.x - c.x;
+        if (k.mode === 'chase' && !changing && k.cool <= 0 && Math.abs(lat) > 0.33 && Math.abs(lat) < 0.67 && Math.abs(d) < 330 && this.state === 'run') {
+          k.mode = 'pit';
+          k.t = 0;
+          k.dir = Math.sign(lat);
+          k.swerved = false;
+          sfx.pitWarn();
+        }
+        if (k.mode === 'pit') {
+          want = this.speed + clamp((-d / UPM) * 1.6, -30, 30); // hold alongside
+          if (!k.swerved) {
+            this.pitWarn = -k.dir;
+            if (Math.abs(this.x - c.x) > 0.75 || Math.abs(d) > 1100 || this.state !== 'run') {
+              k.mode = 'chase';
+              k.cool = 1.3;
+              this.pitDodged(c);
+            } else if (k.t >= H.pitTell) {
+              // The swerve: straight into the lane you were in.
+              k.swerved = true;
+              c.fromX = c.x;
+              c.toX = clamp(c.x + k.dir * 0.5, -0.75, 0.75);
+              c.changeT = 0;
+              c.lane = LANES.indexOf(c.toX) >= 0 ? LANES.indexOf(c.toX) : c.lane;
+              sfx.screech(clamp((c.x - this.x) * 2, -1, 1));
+            }
+          } else if (c.changeT < 0) {
+            k.mode = 'chase';
+            k.swerved = false;
+            k.cool = H.pitCool;
+            if (this.state === 'run') this.pitDodged(c);
+          }
+        }
+        want = Math.min(want, top);
+        // Head start: for the first few seconds after GO they're only just getting going.
+        if (this.chaseT < 4) want = Math.min(want, this.speed + 6);
+      }
+
+      // Traffic ahead: dodge it, or brake behind it (that's how they get stuck).
+      if (!(k.mode === 'pit' && k.swerved)) {
+        const hz = this.copHazard(c);
+        if (hz) {
+          if (hz !== k.hazard) {
+            k.hazard = hz;
+            k.late = !hz.cop && rnd() < H.miss;
+          }
+          const gap = hz.z - hz.spr.length / 2 - (c.z + half);
+          const closing = (c.speed - hz.speed) * UPM;
+          const ttc = closing > 0 ? gap / closing : Infinity;
+          if (ttc < (k.late ? 0.26 : H.react)) {
+            let dodged = changing;
+            if (!changing && !k.fixed) {
+              const opts = [c.lane - 1, c.lane + 1].filter(l => l >= 0 && l <= 3).sort((a, b) => Math.abs(a - this.lane) - Math.abs(b - this.lane));
+              for (const l of opts)
+                if (this.laneFree(c, l, 1300, 2200 + closing * 0.5) && !this.playerNear(l, c, pc)) {
+                  this.copLane(c, l);
+                  if (k.mode === 'pit') k.mode = 'chase';
+                  dodged = true;
+                  break;
+                }
+            }
+            if (!dodged) {
+              want = Math.min(want, hz.speed - 3);
+              hard = true;
+            }
+          }
+        }
+      }
+      const acc = want > c.speed ? 40 : hard ? 100 : 85;
+      c.speed = want > c.speed ? Math.min(want, c.speed + acc * dt) : Math.max(want, c.speed - acc * dt);
+      c.speed = Math.max(0, c.speed);
+      c.z += c.speed * UPM * dt;
+    }
+
+    // Cops that hit traffic are out of the chase.
+    for (const c of this.cars) {
+      const k = c.cop;
+      if (!k || k.mode === 'wreck') continue;
+      const ch = halfWidth(c.spr.bodyW);
+      for (const o of this.cars) {
+        if (o === c || (o.cop && o.cop.mode !== 'wreck')) continue;
+        if (Math.abs(o.z - c.z) < (c.spr.length + o.spr.length) * 0.45 && Math.abs(o.x - c.x) < (ch + halfWidth(o.spr.bodyW)) * 0.85) {
+          this.wreckCop(c, o, pc);
+          break;
+        }
+      }
+    }
+
+    this.seen = seen;
+    this.copGlow += (glow - this.copGlow) * Math.min(1, dt * 6);
+    if (glowSide) this.copSide = glowSide;
+    if (this.state === 'run') {
+      this.chaseT += dt;
+      this.mult = Math.min(H.cap, 1 + H.rate * this.chaseT);
+      this.res.peakMult = this.mult;
+      const tunnel = this.track.tunnel[Math.floor(pz / SEG) % N_SEG] > 0;
+      if (!seen) this.escapeT += dt * (H.heli && !tunnel ? 0.6 : 1);
+      else this.escapeT = Math.max(0, this.escapeT - dt * 3);
+      if (this.escapeT >= H.escape) this.escape();
+      else if (seen) {
+        this.backupT -= dt;
+        if (this.backupT <= 0) {
+          this.backupT = H.backup;
+          if (chasers < H.max) this.callBackup(pc);
+        }
+      }
+    }
+    // Siren: louder as the nearest unit closes in, panned to its side, yelping when it's on you.
+    let near = Infinity;
+    let side = 0;
+    for (const c of this.cars) {
+      if (!c.cop || c.cop.mode === 'wreck') continue;
+      const dd = Math.abs(c.z - pc);
+      if (dd < near) {
+        near = dd;
+        side = clamp((c.x - this.x) * 1.4, -1, 1);
+      }
+    }
+    const vol = this.state === 'escaped' ? 0 : clamp(1 - near / (H.sight * 0.9), 0, 1);
+    this.siren?.update(vol * vol, side, near < 2600);
+  }
+
+  private pitDodged(c: Car) {
+    this.res.pitsDodged++;
+    const pts = Math.round(500 * this.heat!.level * this.mult);
+    this.score += pts;
+    this.pop('PIT dodged', `+${pts.toLocaleString('en-US')}`, '#35f2ff', c.x < this.x ? -1 : 1);
+  }
+
+  private wreckCop(c: Car, o: Car, pc: number) {
+    const k = c.cop!;
+    k.mode = 'wreck';
+    k.t = 0;
+    c.speed *= 0.5;
+    o.speed *= 0.55;
+    if (!o.cop) o.baseSpeed *= 0.55;
+    c.fromX = c.x;
+    c.toX = clamp(c.x + (c.x >= o.x ? 0.24 : -0.24), -0.95, 0.95);
+    c.changeT = 0;
+    const d = c.z - pc;
+    if (Math.abs(d) > this.heat!.sight || this.state !== 'run') return;
+    this.res.copsWrecked++;
+    const pts = Math.round(1500 * this.heat!.level * this.mult);
+    this.score += pts;
+    const side = c.x < this.x ? -1 : 1;
+    this.pop('Cop down', `+${pts.toLocaleString('en-US')}`, '#4d8dff', side);
+    sfx.copDown(clamp((c.x - this.x) * 1.5, -1, 1), clamp(1 - Math.abs(d) / 12000, 0.15, 1));
+    // sparks where it happened, if it's on screen
+    if (d > -PLAYER_Z + 200) {
+      this.proj(c.z - c.spr.length / 2, c.x * ROAD_W, 200);
+      const [sx, sy] = this.pt;
+      if (sx > -50 && sx < W + 50 && sy > 0 && sy < H) {
+        for (let i = 0; i < 24; i++) {
+          const a = rnd() * Math.PI * 2;
+          const v = 60 + rnd() * 260;
+          this.parts.push({x: sx, y: sy, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 160, life: 0, max: 0.4 + rnd() * 0.6, size: 2, color: rnd() < 0.5 ? '#ffd27a' : '#ff8a2b', kind: 'spark'});
+        }
+      }
+    }
+  }
+
+  private callBackup(pc: number) {
+    const H = this.heat!;
+    const clearLane = (z: number) => {
+      const free = [0, 1, 2, 3].filter(l => !this.cars.some(c => Math.abs(c.x - LANES[l]) < 0.4 && Math.abs(c.z - z) < 3200));
+      return free.length ? pick(free) : -1;
+    };
+    if (H.ahead && rnd() < 0.5) {
+      const z = pc + 22000 + rnd() * 5000;
+      const l = clearLane(z);
+      if (l >= 0) {
+        this.spawnCop(z, l, 'block');
+        this.pop('Unit ahead', 'Cutting you off', '#4d8dff', -1);
+        sfx.radio();
+        return;
+      }
+    }
+    const z = pc - (0.55 + rnd() * 0.3) * H.sight;
+    const l = clearLane(z);
+    if (l < 0) return;
+    this.spawnCop(z, l, 'chase');
+    this.pop('Backup', 'Unit inbound', '#4d8dff', -1);
+    sfx.radio();
+  }
+
+  private escape() {
+    const H = this.heat!;
+    this.state = 'escaped';
+    this.endT = 0;
+    this.slow = 0.45;
+    this.res.escaped = true;
+    this.bank();
+    const bonus = Math.round(H.bonus * this.mult);
+    this.res.escapeBonus = bonus;
+    this.score += bonus;
+    this.siren?.update(0, 0, false);
+    sfx.escape();
+    // the remaining units give up
+    for (const c of this.cars) if (c.cop && c.cop.mode !== 'wreck') c.cop.mode = 'block';
   }
 
   /** A car may only start a lane change if it will finish well before the player reaches it. */
@@ -686,7 +1124,7 @@ export class Game {
     this.combo++;
     this.comboT = 3.4;
     const mult = Math.min(10, this.combo);
-    const pts = Math.round((80 + rel * 3) * [1, 1.8, 3.2][tier] * (this.nitroOn ? 1.5 : 1)) * mult;
+    const pts = Math.round((80 + rel * 3) * [1, 1.8, 3.2][tier] * (this.nitroOn ? 1.5 : 1) * this.mult) * mult;
     this.pending += pts;
     this.res.nearMisses++;
     if (tier === 1) this.res.close++;
@@ -699,9 +1137,10 @@ export class Game {
     // Two cars passed on opposite sides in quick succession: threading the needle.
     if (this.time - this.lastNear.t < 0.4 && this.lastNear.side === -side) {
       this.res.threads++;
-      this.pending += 600 * mult;
+      const tp = Math.round(600 * mult * this.mult);
+      this.pending += tp;
       sfx.thread();
-      this.pop('Threaded', `+${(600 * mult).toLocaleString('en-US')}`, '#35f2ff', side);
+      this.pop('Threaded', `+${tp.toLocaleString('en-US')}`, '#35f2ff', side);
     }
     this.lastNear = {t: this.time, side};
     this.pop(label, `+${pts.toLocaleString('en-US')}`, tier === 2 ? '#ff3ad1' : tier === 1 ? '#ffcf4a' : '#ffffff', side);
@@ -724,6 +1163,11 @@ export class Game {
 
   private crash(c: Car) {
     this.state = 'crash';
+    if (this.heat) {
+      // In a pursuit any crash ends it: the cops catch you.
+      this.res.bustedBy = c.cop && c.cop.mode !== 'wreck' ? 'cop' : 'traffic';
+      if (c.cop && c.cop.mode !== 'wreck') sfx.busted();
+    }
     this.crashT = 0;
     this.slow = 0.35;
     this.shake = 1;
@@ -750,6 +1194,10 @@ export class Game {
 
   private finish() {
     this.res.score = Math.round(this.score);
+    this.res.chaseTime = Math.round(this.chaseT * 10) / 10;
+    this.res.peakMult = Math.round(this.mult * 100) / 100;
+    this.siren?.stop();
+    this.siren = null;
     this.res.distance = Math.round(this.res.distance * 100) / 100;
     this.res.topSpeed = Math.round(this.res.topSpeed);
     this.engine?.stop();
@@ -780,11 +1228,13 @@ export class Game {
     // Sky: a soft glow over the city, the moon, then the skyline with parallax.
     g.drawImage(S.skyGlow, 0, HORIZON - 140, W, 150);
     g.globalCompositeOperation = 'lighter';
-    g.drawImage(S.white, 452, 40, 70, 70);
+    const mx = this.heat ? 392 : 487;
+    const my = this.heat ? 122 : 75;
+    g.drawImage(S.white, mx - 35, my - 35, 70, 70);
     g.globalCompositeOperation = 'source-over';
     g.fillStyle = '#e9eef5';
     g.beginPath();
-    g.arc(487, 75, 13, 0, Math.PI * 2);
+    g.arc(mx, my, 13, 0, Math.PI * 2);
     g.fill();
     const sky = S.skyline;
     const off = (((this.skyX * 3 + this.camX * 0.02) % sky.width) + sky.width) % sky.width;
@@ -897,9 +1347,11 @@ export class Game {
     }
 
     this.drawSpeedLines(g, now);
+    if (this.heat) this.drawPursuitFx(g, now, pz);
     this.drawPlayer(g, now);
     for (const [c, a] of near) this.drawCar(g, c, a, now, -Infinity, pz, true);
     g.globalAlpha = 1;
+    if (this.heat) this.drawPursuitWarnings(g, now);
     this.drawParticles(g);
     if (this.opts.mode === 'play') {
       if (this.hud) {
@@ -1137,6 +1589,10 @@ export class Game {
       const hi = Math.min(zhi, rear + L);
       if (hi > lo) this.drawBody(g, c, lo, hi, a);
     }
+    if (c.cop) {
+      const lz = rear + (c.spr.body.g1 + 0.075) * L;
+      if (lz >= zlo && lz < zhi) this.drawCopLights(g, c, lz, now, a);
+    }
     if (!rearFace || cz < NEAR) return;
     const s = this.dfov / cz;
     const k = SPR_K * s * (W / 2);
@@ -1215,6 +1671,14 @@ export class Game {
         v(0.86, sl, belt);
         v(0.86, sl, belt - 4 * K);
         this.fillPoly(g, lo, hi, b.top);
+        if (b.doors) {
+          const d0 = lo3 + (belt - lo3) * 0.36;
+          v(0.29, sl, d0);
+          v(0.29, sl, belt - 5 * K);
+          v(0.67, sl, belt - 5 * K);
+          v(0.67, sl, d0);
+          this.fillPoly(g, lo, hi, b.doors);
+        }
         for (const wf of b.wheels) this.wheel(g, Z(wf), sl + sg * 2, b.wr * K, lo, hi);
       }
       // deck: trunk, shoulders and hood
@@ -1292,6 +1756,28 @@ export class Game {
         v(b.r1 - 0.03, X - ct * 0.42, roof);
         this.fillPoly(g, lo, hi, b.sheen);
         g.globalAlpha = a;
+      }
+      if (c.cop) {
+        // roof light bar
+        const z0 = b.g1 + 0.04;
+        const z1 = b.g1 + 0.11;
+        const lw = ct * 0.84;
+        const hb = roof + 9 * K;
+        v(z0, X - lw, hb);
+        v(z0, X + lw, hb);
+        v(z1, X + lw, hb);
+        v(z1, X - lw, hb);
+        this.fillPoly(g, lo, hi, '#2b2f37');
+        v(z0, X - lw, roof);
+        v(z0, X - 2 * K, roof);
+        v(z0, X - 2 * K, hb);
+        v(z0, X - lw, hb);
+        this.fillPoly(g, lo, hi, '#5c1222');
+        v(z0, X + 2 * K, roof);
+        v(z0, X + lw, roof);
+        v(z0, X + lw, hb);
+        v(z0, X + 2 * K, hb);
+        this.fillPoly(g, lo, hi, '#132a66');
       }
       if (near && sg) this.markers(g, Z(0.03), Z(0.95), sl, belt * 0.72, lo, hi, a);
       return;
@@ -1445,6 +1931,109 @@ export class Game {
     g.globalAlpha = a;
   }
 
+  /** Red and blue light bar: alternating strobes, a halo, and colour washed over the road. */
+  private drawCopLights(g: CanvasRenderingContext2D, c: Car, z: number, now: number, a: number) {
+    const cz = z - this.pos;
+    if (cz < NEAR) return;
+    const k = c.cop!;
+    const b = c.spr.body;
+    const s = this.dfov / cz;
+    const t = ((now / 1000) * (k.mode === 'wreck' ? 1.2 : 2.2) + k.phase) % 1;
+    const redOn = t < 0.5;
+    const strobe = Math.floor(t * 8) % 2 === 0;
+    const X = c.x * ROAD_W;
+    const h = (b.roof + 5) * SPR_K;
+    const lat = b.ct * 0.48 * SPR_K;
+    const side = redOn ? -1 : 1;
+    const spr = redOn ? this.S.red : this.S.blue;
+    g.globalCompositeOperation = 'lighter';
+    // road wash under the car
+    this.proj(c.z, X, 0);
+    const ww = Math.min(900, s * 3000 * (W / 2));
+    g.globalAlpha = a * 0.32;
+    g.drawImage(spr, this.pt[0] - ww / 2, this.pt[1] - ww * 0.16, ww, ww * 0.32);
+    this.proj(z, X + side * lat, h);
+    const px = this.pt[0];
+    const py = this.pt[1];
+    const big = Math.min(460, s * (strobe ? 1700 : 1000) * (W / 2));
+    const core = Math.max(3, Math.min(120, s * 300 * (W / 2)));
+    g.globalAlpha = a * (strobe ? 0.95 : 0.6);
+    g.drawImage(spr, px - big / 2, py - big / 2, big, big);
+    g.globalAlpha = a;
+    g.drawImage(spr, px - core / 2, py - core / 2, core, core);
+    if (strobe) g.drawImage(this.S.white, px - core * 0.3, py - core * 0.3, core * 0.6, core * 0.6);
+    g.globalCompositeOperation = 'source-over';
+    g.globalAlpha = a;
+  }
+
+  /** Pursuit overlays drawn with the scene: helicopter spotlight, warning lights behind you. */
+  private drawPursuitFx(g: CanvasRenderingContext2D, now: number, pz: number) {
+    const H = this.heat!;
+    const tunnel = this.track.tunnel[Math.floor(pz / SEG) % N_SEG] > 0;
+    if (H.heli && !tunnel && (this.state === 'run' || this.state === 'crash')) {
+      this.proj(pz + 300, this.x * ROAD_W + Math.sin(now / 900) * 260, 0);
+      const sx = this.pt[0];
+      const sy = this.pt[1];
+      const top = W / 2 + Math.sin(now / 1300) * 90;
+      g.fillStyle = 'rgba(235,245,255,.045)';
+      g.beginPath();
+      g.moveTo(top - 14, -10);
+      g.lineTo(top + 14, -10);
+      g.lineTo(sx + 170, sy);
+      g.lineTo(sx - 170, sy);
+      g.closePath();
+      g.fill();
+      g.globalCompositeOperation = 'lighter';
+      g.globalAlpha = 0.28;
+      g.drawImage(this.S.white, sx - 200, sy - 70, 400, 140);
+      g.globalAlpha = 1;
+      g.globalCompositeOperation = 'source-over';
+    }
+  }
+
+  /** Flashing red and blue from behind, and PIT / bumper warnings, drawn over your car. */
+  private drawPursuitWarnings(g: CanvasRenderingContext2D, now: number) {
+    if (this.state !== 'run' && this.state !== 'crash') return;
+    const flip = Math.floor(now / 140) % 2 === 0;
+    if (this.copGlow > 0.03) {
+      g.globalCompositeOperation = 'lighter';
+      const s = 380;
+      const k = this.copGlow;
+      g.globalAlpha = k * (this.copSide <= 0 ? 0.75 : 0.4) * (flip ? 1 : 0.55);
+      g.drawImage(flip ? this.S.red : this.S.blue, -s * 0.45, H - s * 0.42, s, s);
+      g.globalAlpha = k * (this.copSide >= 0 ? 0.75 : 0.4) * (flip ? 0.55 : 1);
+      g.drawImage(flip ? this.S.blue : this.S.red, W - s * 0.55, H - s * 0.42, s, s);
+      g.globalAlpha = 1;
+      g.globalCompositeOperation = 'source-over';
+    }
+    if (this.state !== 'run') return;
+    g.textAlign = 'center';
+    if (this.pitWarn) {
+      const x = W / 2 + this.pitWarn * 168;
+      g.fillStyle = flip ? '#ff2e4d' : '#ffffff';
+      g.font = 'italic 900 26px system-ui, Arial';
+      g.fillText('PIT', x, 386);
+      // chevrons pointing away from the cop: that's where to go
+      g.beginPath();
+      for (let i = 0; i < 2; i++) {
+        const cx = x - this.pitWarn * (40 + i * 16);
+        g.moveTo(cx + this.pitWarn * 7, 362);
+        g.lineTo(cx - this.pitWarn * 5, 374);
+        g.lineTo(cx + this.pitWarn * 7, 386);
+      }
+      g.lineWidth = 4;
+      g.lineJoin = 'round';
+      g.strokeStyle = g.fillStyle;
+      g.stroke();
+    } else if (this.bumper > 0.15) {
+      g.globalAlpha = Math.min(1, this.bumper * 1.4);
+      g.fillStyle = flip ? '#ff2e4d' : '#4d8dff';
+      g.font = 'italic 900 15px system-ui, Arial';
+      g.fillText('COP ON YOUR BUMPER', W / 2, 584);
+      g.globalAlpha = 1;
+    }
+  }
+
   private drawSpeedLines(g: CanvasRenderingContext2D, now: number) {
     const f = this.speed / 160;
     if (f < 0.7 && !this.nitroOn) return;
@@ -1553,6 +2142,111 @@ export class Game {
     g.globalAlpha = 1;
   }
 
+  private drawPursuitHud(g: CanvasRenderingContext2D, now: number) {
+    const H = this.heat!;
+    const flip = Math.floor(now / 220) % 2 === 0;
+    // Chase multiplier under the score
+    g.textAlign = 'left';
+    g.fillStyle = '#ffcf4a';
+    g.font = 'italic 900 22px system-ui, Arial';
+    const m = `×${this.mult.toFixed(2)}`;
+    g.fillText(m, 20, 98);
+    const mw = g.measureText(m).width;
+    g.fillStyle = 'rgba(255,207,74,.7)';
+    g.font = '800 11px system-ui, Arial';
+    g.fillText('CHASE', 26 + mw, 97);
+
+    // Heat stars, top right
+    for (let i = 0; i < 5; i++) {
+      const cx = W - 28 - (4 - i) * 21;
+      const on = i < H.level;
+      star(g, cx, 30, 8.5);
+      if (on) {
+        g.fillStyle = this.seen && this.state === 'run' ? ((i % 2 === 0) === flip ? '#ff2e4d' : '#4d8dff') : '#ffcf4a';
+        g.fill();
+      } else {
+        g.strokeStyle = 'rgba(255,255,255,.28)';
+        g.lineWidth = 1.5;
+        g.stroke();
+      }
+    }
+    // Status: in pursuit, or evading with the escape meter
+    g.textAlign = 'right';
+    if (this.state === 'run' || this.state === 'crash') {
+      if (this.seen) {
+        g.fillStyle = flip ? '#ff2e4d' : '#4d8dff';
+        g.font = 'italic 900 17px system-ui, Arial';
+        g.fillText('IN PURSUIT', W - 20, 62);
+      } else {
+        g.fillStyle = '#35f2ff';
+        g.font = 'italic 900 17px system-ui, Arial';
+        g.fillText('EVADING', W - 20, 62);
+      }
+      const f = clamp(this.escapeT / H.escape, 0, 1);
+      g.fillStyle = 'rgba(255,255,255,.16)';
+      g.fillRect(W - 20 - 120, 70, 120, 5);
+      g.fillStyle = '#35f2ff';
+      g.fillRect(W - 20 - 120, 70, 120 * f, 5);
+      g.fillStyle = 'rgba(244,247,251,.7)';
+      g.font = '700 11px system-ui, Arial';
+      g.fillText(this.seen ? 'Get out of sight to escape' : `Escape in ${Math.max(0, Math.ceil((H.escape - this.escapeT) / (H.heli ? 0.6 : 1)))}s`, W - 20, 90);
+      if (H.heli) {
+        g.fillStyle = '#ffae2b';
+        g.fillText('Helicopter overhead · tunnels hide you', W - 20, 105);
+      }
+    }
+
+    // Radar, bottom left: lanes, you, and every unit within sight (ahead at the top, behind below).
+    const rx = 16;
+    const ry = 456;
+    const rw = 84;
+    const rh = 128;
+    g.fillStyle = 'rgba(8,12,18,.72)';
+    roundRect(g, rx, ry, rw, rh, 12);
+    g.fill();
+    g.fillStyle = 'rgba(255,255,255,.08)';
+    for (const l of [-0.5, 0, 0.5]) g.fillRect(rx + rw / 2 + l * 40 - 0.5, ry + 8, 1, rh - 16);
+    const py = ry + 34;
+    const lx = (x: number) => rx + rw / 2 + x * 40;
+    const pc = this.pos + PLAYER_Z + PLAYER_LEN / 2;
+    for (const c of this.cars) {
+      if (!c.cop) continue;
+      const d = c.z - pc;
+      let y: number;
+      let fade = 1;
+      if (d >= 0) y = py - Math.min(1, d / (H.sight * 0.75)) * 24;
+      else {
+        const f = -d / H.sight;
+        y = py + Math.min(1, f) * (rh - 44);
+        if (f > 1) fade = 0.35;
+      }
+      g.globalAlpha = fade;
+      if (c.cop.mode === 'wreck') {
+        g.fillStyle = 'rgba(160,170,180,.6)';
+        g.fillRect(lx(c.x) - 2.5, y - 2.5, 5, 5);
+      } else {
+        const r = c.cop.mode === 'pit' ? 5 : 3.6;
+        g.fillStyle = (Math.floor(now / 160) + Math.round(c.cop.phase * 4)) % 2 ? '#ff2e4d' : '#4d8dff';
+        g.beginPath();
+        g.arc(lx(c.x), y, r, 0, Math.PI * 2);
+        g.fill();
+        if (c.cop.mode === 'pit') {
+          g.strokeStyle = '#ffffff';
+          g.lineWidth = 1.5;
+          g.stroke();
+        }
+      }
+    }
+    g.globalAlpha = 1;
+    g.fillStyle = '#35f2ff';
+    g.beginPath();
+    g.moveTo(lx(this.x), py - 7);
+    g.lineTo(lx(this.x) + 5.5, py + 6);
+    g.lineTo(lx(this.x) - 5.5, py + 6);
+    g.closePath();
+    g.fill();
+  }
+
   private drawHud(g: CanvasRenderingContext2D, now: number) {
     const kmh = this.opts.units === 'kmh';
     g.textBaseline = 'alphabetic';
@@ -1568,11 +2262,13 @@ export class Game {
       g.globalAlpha = Math.min(1, this.bankFx);
       g.fillStyle = '#35f2ff';
       g.font = 'italic 900 18px system-ui, Arial';
-      g.fillText(`+${this.bankAmt.toLocaleString('en-US')} banked`, 22, 92 - (1.4 - this.bankFx) * 12);
+      g.fillText(`+${this.bankAmt.toLocaleString('en-US')} banked`, 22, (this.heat ? 122 : 92) - (1.4 - this.bankFx) * 12);
       g.globalAlpha = 1;
     }
 
+    if (this.heat) this.drawPursuitHud(g, now);
     // Distance, top right
+    else {
     g.textAlign = 'right';
     g.fillStyle = 'rgba(244,247,251,.6)';
     g.font = '700 12px system-ui, Arial';
@@ -1581,6 +2277,7 @@ export class Game {
     g.font = 'italic 900 22px system-ui, Arial';
     const dist = kmh ? this.res.distance * 1.609 : this.res.distance;
     g.fillText(`${dist.toFixed(2)} ${kmh ? 'km' : 'mi'}`, W - 20, 60);
+    }
 
     // Combo meter, top centre
     if (this.combo > 0) {
@@ -1693,7 +2390,7 @@ export class Game {
       g.globalAlpha = 1;
       g.fillStyle = 'rgba(244,247,251,.75)';
       g.font = '700 14px system-ui, Arial';
-      g.fillText('Swipe left and right to change lanes', W / 2, 320);
+      g.fillText(this.heat ? `Heat ${this.heat.level}: stay out of sight for ${this.heat.escape}s to escape` : 'Swipe left and right to change lanes', W / 2, 320);
     } else if (this.time < 4.4 && this.state === 'run') {
       g.globalAlpha = Math.max(0, 1 - (this.time - 3) / 1.4);
       g.textAlign = 'center';
@@ -1702,16 +2399,35 @@ export class Game {
       g.fillText('GO', W / 2, 280);
       g.globalAlpha = 1;
     }
-    if (this.state === 'crash' || this.state === 'over') {
+    if (this.res.escaped && (this.state === 'escaped' || this.state === 'over')) {
+      g.textAlign = 'center';
+      g.globalAlpha = Math.min(1, this.endT * 3);
+      g.fillStyle = '#35f2ff';
+      g.font = 'italic 900 62px system-ui, Arial';
+      g.shadowColor = 'rgba(53,242,255,.7)';
+      g.shadowBlur = 22;
+      g.fillText('ESCAPED', W / 2, 250);
+      g.shadowBlur = 0;
+      g.fillStyle = '#ffcf4a';
+      g.font = 'italic 900 20px system-ui, Arial';
+      g.fillText(`+${this.res.escapeBonus.toLocaleString('en-US')} escape bonus`, W / 2, 284);
+      g.globalAlpha = 1;
+    } else if (this.state === 'crash' || this.state === 'over') {
       g.textAlign = 'center';
       g.globalAlpha = Math.min(1, this.crashT * 2);
-      g.fillStyle = '#ff2e4d';
+      const busted = !!this.heat;
+      const blue = busted && Math.floor(now / 200) % 2 === 1;
+      g.fillStyle = blue ? '#4d8dff' : '#ff2e4d';
       g.font = 'italic 900 58px system-ui, Arial';
-      g.shadowColor = 'rgba(255,46,77,.6)';
+      g.shadowColor = blue ? 'rgba(77,141,255,.6)' : 'rgba(255,46,77,.6)';
       g.shadowBlur = 18;
-      g.fillText('Wrecked', W / 2, 250);
+      g.fillText(busted ? 'BUSTED' : 'Wrecked', W / 2, 250);
       g.shadowBlur = 0;
-      if (this.res.lostCombo > 0) {
+      if (busted) {
+        g.fillStyle = '#ffffff';
+        g.font = 'italic 800 16px system-ui, Arial';
+        g.fillText(this.res.bustedBy === 'cop' ? 'They got you. Chase payout lost.' : 'You wrecked. Chase payout lost.', W / 2, 280);
+      } else if (this.res.lostCombo > 0) {
         g.fillStyle = '#ffffff';
         g.font = 'italic 800 16px system-ui, Arial';
         g.fillText(`Combo lost: −${this.res.lostCombo.toLocaleString('en-US')}`, W / 2, 280);
@@ -1719,6 +2435,26 @@ export class Game {
       g.globalAlpha = 1;
     }
   }
+}
+
+function star(g: CanvasRenderingContext2D, cx: number, cy: number, r: number) {
+  g.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const a = -Math.PI / 2 + (i * Math.PI) / 5;
+    const rr = i % 2 ? r * 0.45 : r;
+    g.lineTo(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr);
+  }
+  g.closePath();
+}
+
+function roundRect(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+  g.beginPath();
+  g.moveTo(x + r, y);
+  g.arcTo(x + w, y, x + w, y + h, r);
+  g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r);
+  g.arcTo(x, y, x + w, y, r);
+  g.closePath();
 }
 
 function quad(g: CanvasRenderingContext2D, x1: number, y1: number, x2: number, y2: number, x3: number, y3: number, x4: number, y4: number) {

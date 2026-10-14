@@ -56,6 +56,25 @@ export const Gauge = ({size = 16, ...p}: P) => (
   </svg>
 );
 
+export const SirenIcon = ({size = 18, ...p}: P) => (
+  <svg {...base(size, p)}>
+    <path d="M6 18v-5a6 6 0 0 1 12 0v5" fill="none" stroke="currentColor" strokeWidth="2" />
+    <rect x="4" y="18" width="16" height="3" rx="1" fill="currentColor" />
+    <path d="M12 2.5v2.5M3.5 6.5l1.8 1.6M20.5 6.5l-1.8 1.6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+  </svg>
+);
+export const Star = ({size = 18, filled = true, ...p}: P & {filled?: boolean}) => (
+  <svg {...base(size, p)}>
+    <path
+      d="M12 2.8l2.75 5.9 6.45.7-4.8 4.4 1.35 6.35L12 16.9l-5.75 3.25 1.35-6.35-4.8-4.4 6.45-.7z"
+      fill={filled ? 'currentColor' : 'none'}
+      stroke="currentColor"
+      strokeWidth={filled ? 0 : 1.6}
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
 /** The CUT UP wordmark: the letters are sliced along a diagonal and the top half shifts, like a lane change. */
 export function Logo({size = 1}: {size?: number}) {
   return (
